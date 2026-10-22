@@ -1,26 +1,24 @@
 # Databricks notebook source
-# LESSON_TITLE: Ingestion with Auto Loader, read_files and COPY INTO
+# LESSON_TITLE: Spark SQL Transformations
 
 # COMMAND ----------
 
 # DBTITLE 1,1 — Title
 # MAGIC %md
-# MAGIC # L03 — Ingestion with Auto Loader, read_files and COPY INTO
+# MAGIC # L03 — Spark SQL Transformations: joins, aggregations, window functions
 # MAGIC
-# MAGIC **Exam objectives** (quoted from the official exam guides):
+# MAGIC **Exam objectives**
 # MAGIC
-# MAGIC * Associate (May 4, 2026), Section 2 *Development and Ingestion*: "Classify valid Auto Loader sources and use cases", "Demonstrate knowledge of Auto Loader syntax", "Use Databricks' built-in debugging tools to troubleshoot a given issue".
-# MAGIC * Associate, Section 3: "Identify DDL (Data Definition Language)/DML features" — here: `COPY INTO`.
-# MAGIC * Professional (Oct 9, 2026), Section 2: "Develop data ingestion pipelines to ingest a variety of data formats … from diverse sources such as … cloud storage."
-# MAGIC * Professional, Section 1: "Create production-ready data pipelines for streaming data using Lakeflow Pipelines and Auto Loader." This lesson covers the Auto Loader part. Lakeflow Declarative Pipelines (formerly Delta Live Tables, DLT) come in a later lesson.
+# MAGIC * Professional (Oct 9, 2026), Section 3 *Data Transformation, Cleansing, and Quality* (12% of the exam): write efficient Spark SQL to clean, join, aggregate and deduplicate data.
+# MAGIC * The same SQL is the base of every later lesson: Lakeflow Declarative Pipelines (formerly Delta Live Tables), MERGE with deduplicated sources, and data modeling.
 # MAGIC
 # MAGIC **5 learning objectives**
 # MAGIC
-# MAGIC 1. **Use** `read_files` to query JSON and CSV files in a Unity Catalog volume, with schema inference, `schemaHints` and the `_metadata` column.
-# MAGIC 2. **Explain** how Auto Loader remembers which files it has already loaded (checkpoint) and where it keeps the inferred schema (`cloudFiles.schemaLocation`).
-# MAGIC 3. **Compare** `read_files`, `COPY INTO` and Auto Loader: batch vs incremental, idempotency, scale, schema evolution.
-# MAGIC 4. **Implement** incremental ingestion with Auto Loader (`format("cloudFiles")`) and `trigger(availableNow=True)` into a Delta table, including schema evolution and rescued data.
-# MAGIC 5. **Diagnose** ingestion problems with `cloud_files_state`, the `_schemas` folder, the error class of a stopped stream, and the `_rescued_data` column.
+# MAGIC 1. **Use** all join types (`INNER`, `LEFT`, `FULL`, `LEFT SEMI`, `LEFT ANTI`, `CROSS`) and the null-safe operator `<=>`.
+# MAGIC 2. **Explain** the logical order of a query (`FROM` → `WHERE` → `GROUP BY` → `HAVING` → window → `QUALIFY` → `SELECT` → `ORDER BY` → `LIMIT`) and why `NOT IN` breaks when the subquery has a `NULL`.
+# MAGIC 3. **Compare** `ROW_NUMBER`, `RANK` and `DENSE_RANK` on ties, and the default window frame with an explicit `ROWS` frame.
+# MAGIC 4. **Implement** deduplication with `QUALIFY`, gaps between visits with `LAG`, subtotals with `ROLLUP`, and reshaping with `PIVOT` / `UNPIVOT` and higher-order functions.
+# MAGIC 5. **Diagnose** wrong results caused by `NULL` keys, ties, the default frame and `AVG(CASE … ELSE 0 END)`.
 # MAGIC
 # MAGIC > **Evidence-only rule:** every number and error class in this notebook comes from a real run of this notebook (the build fills them in), or from an official Databricks doc page named in the text. Things that cannot be tested on this workspace are marked **NOT VERIFIED — concept only (reason)**.
 
@@ -56,9 +54,9 @@ def error_class(e):
 
 # DBTITLE 1,W1 Task
 # MAGIC %md
-# MAGIC ### W1 — Schema evolution on append
-# MAGIC Create the table `main.dbacademy_l03.wu1_claims (claim_id INT, amount DOUBLE)` with the rows `(1, 100.0)` and `(2, 200.0)`.
-# MAGIC Then append a DataFrame with the columns `claim_id, amount, payer` and the rows `(3, 300.0, 'Medicare')` and `(4, 400.0, 'Aetna')`, so that the table **gets the new column** `payer`.
+# MAGIC ### W1 — Append a DataFrame with a new column
+# MAGIC Create the table `main.dbacademy_l03.wu1_encounters (encounter_id INT, encounter_type STRING)` with the rows `(1, 'ER')` and `(2, 'INPATIENT')`.
+# MAGIC Then append a DataFrame with the columns `encounter_id, encounter_type, provider_id` and the rows `(3, 'OUTPATIENT', 7)` and `(4, 'ER', 9)`, so that the table **gets the new column** `provider_id` (type `INT`).
 
 # COMMAND ----------
 
@@ -66,35 +64,36 @@ def error_class(e):
 # >>> BLANK W1
 # Your code here
 # >>> SOLUTION W1
-spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu1_claims")
-spark.sql("CREATE TABLE main.dbacademy_l03.wu1_claims (claim_id INT, amount DOUBLE)")
-spark.sql("INSERT INTO main.dbacademy_l03.wu1_claims VALUES (1, 100.0), (2, 200.0)")
-new_rows = spark.createDataFrame([(3, 300.0, "Medicare"), (4, 400.0, "Aetna")], "claim_id INT, amount DOUBLE, payer STRING")
-new_rows.write.mode("append").option("mergeSchema", "true").saveAsTable("main.dbacademy_l03.wu1_claims")
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu1_encounters")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu1_encounters (encounter_id INT, encounter_type STRING)")
+spark.sql("INSERT INTO main.dbacademy_l03.wu1_encounters VALUES (1, 'ER'), (2, 'INPATIENT')")
+new_rows = spark.createDataFrame([(3, "OUTPATIENT", 7), (4, "ER", 9)], "encounter_id INT, encounter_type STRING, provider_id INT")
+new_rows.write.mode("append").option("mergeSchema", "true").saveAsTable("main.dbacademy_l03.wu1_encounters")
 # <<< END W1
 
 # COMMAND ----------
 
 # DBTITLE 1,W1 Validation
 try:
-    t = spark.table("main.dbacademy_l03.wu1_claims")
+    t = spark.table("main.dbacademy_l03.wu1_encounters")
     cols, rows = t.columns, t.count()
-    null_payers = t.filter("payer IS NULL").count() if "payer" in cols else None
-    WARMUP_PASSED["W1"] = cols == ["claim_id", "amount", "payer"] and rows == 4 and null_payers == 2
-    print("✅ Passed" if WARMUP_PASSED["W1"] else
-          f"Hint: want columns [claim_id, amount, payer], 4 rows, 2 NULL payers; got {cols}, {rows} rows, {null_payers} NULL payers. "
-          "An append with a new column needs option('mergeSchema', 'true').")
+    null_providers = t.filter("provider_id IS NULL").count() if "provider_id" in cols else None
+    ok = cols == ["encounter_id", "encounter_type", "provider_id"] and rows == 4 and null_providers == 2
+    WARMUP_PASSED["W1"] = ok
+    print("✅ Passed" if ok else
+          f"Hint: want columns [encounter_id, encounter_type, provider_id], 4 rows, 2 NULL provider_id; "
+          f"got {cols}, {rows} rows, {null_providers} NULL. An append with a new column needs one writer option.")
 except Exception as e:
     WARMUP_PASSED["W1"] = False
-    print("Hint: create main.dbacademy_l03.wu1_claims first.", error_class(e))
+    print("Hint: create main.dbacademy_l03.wu1_encounters first.", error_class(e))
 
 # COMMAND ----------
 
 # DBTITLE 1,W2 Task
 # MAGIC %md
-# MAGIC ### W2 — CHECK constraint
-# MAGIC Create `main.dbacademy_l03.wu2_claims (claim_id INT, amount DOUBLE)`. Add a CHECK constraint named `positive_amount` so that `amount` must be greater than 0.
-# MAGIC Insert `(1, 50.0)`. Then try to insert `(2, -5.0)` and catch the error, so the cell does not fail. Print the error class.
+# MAGIC ### W2 — CHECK constraint on a table that already has bad rows
+# MAGIC Create `main.dbacademy_l03.wu2_labs (lab_id INT, result_value DOUBLE)` with the rows `(1, 5.4)`, `(2, -1.0)`, `(3, 7.2)`.
+# MAGIC Add a CHECK constraint named `non_negative` so that `result_value >= 0`. The first try fails because of the existing bad row: catch that error and print its class. Then remove the bad row and add the constraint.
 
 # COMMAND ----------
 
@@ -102,37 +101,39 @@ except Exception as e:
 # >>> BLANK W2
 # Your code here
 # >>> SOLUTION W2
-spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu2_claims")
-spark.sql("CREATE TABLE main.dbacademy_l03.wu2_claims (claim_id INT, amount DOUBLE)")
-spark.sql("ALTER TABLE main.dbacademy_l03.wu2_claims ADD CONSTRAINT positive_amount CHECK (amount > 0)")
-spark.sql("INSERT INTO main.dbacademy_l03.wu2_claims VALUES (1, 50.0)")
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu2_labs")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu2_labs (lab_id INT, result_value DOUBLE)")
+spark.sql("INSERT INTO main.dbacademy_l03.wu2_labs VALUES (1, 5.4), (2, -1.0), (3, 7.2)")
 try:
-    spark.sql("INSERT INTO main.dbacademy_l03.wu2_claims VALUES (2, -5.0)")
+    spark.sql("ALTER TABLE main.dbacademy_l03.wu2_labs ADD CONSTRAINT non_negative CHECK (result_value >= 0)")
 except Exception as e:
-    print("rejected:", error_class(e))
+    print("first try failed:", error_class(e))
+spark.sql("DELETE FROM main.dbacademy_l03.wu2_labs WHERE result_value < 0")
+spark.sql("ALTER TABLE main.dbacademy_l03.wu2_labs ADD CONSTRAINT non_negative CHECK (result_value >= 0)")
 # <<< END W2
 
 # COMMAND ----------
 
 # DBTITLE 1,W2 Validation
 try:
-    rows = spark.table("main.dbacademy_l03.wu2_claims").count()
-    props = {r["key"]: r["value"] for r in spark.sql("SHOW TBLPROPERTIES main.dbacademy_l03.wu2_claims").collect()}
-    has_check = "delta.constraints.positive_amount" in props
-    WARMUP_PASSED["W2"] = rows == 1 and has_check
-    print("✅ Passed" if WARMUP_PASSED["W2"] else
-          f"Hint: want 1 row and a constraint named positive_amount; got {rows} rows, constraint present = {has_check}.")
+    rows = spark.table("main.dbacademy_l03.wu2_labs").count()
+    props = {r["key"]: r["value"] for r in spark.sql("SHOW TBLPROPERTIES main.dbacademy_l03.wu2_labs").collect()}
+    has_check = "delta.constraints.non_negative" in props
+    ok = rows == 2 and has_check
+    WARMUP_PASSED["W2"] = ok
+    print("✅ Passed" if ok else
+          f"Hint: want 2 rows and a constraint named non_negative; got {rows} rows, constraint present = {has_check}.")
 except Exception as e:
     WARMUP_PASSED["W2"] = False
-    print("Hint: create main.dbacademy_l03.wu2_claims first.", error_class(e))
+    print("Hint: create main.dbacademy_l03.wu2_labs first.", error_class(e))
 
 # COMMAND ----------
 
 # DBTITLE 1,W3 Task
 # MAGIC %md
-# MAGIC ### W3 — DEEP CLONE is independent
-# MAGIC Create `main.dbacademy_l03.wu3_src` with the ids 1 to 5 (one column `id`). Make a **deep clone** called `main.dbacademy_l03.wu3_clone`.
-# MAGIC Delete the ids 1 and 2 from the **clone** only. The source must still have 5 rows.
+# MAGIC ### W3 — SHALLOW CLONE for a dev copy
+# MAGIC Create `main.dbacademy_l03.wu3_src` with the ids 1 to 5 (one column `id`). Make a **shallow clone** called `main.dbacademy_l03.wu3_dev`.
+# MAGIC Delete the id 5 from the **clone** only. The source must still have 5 rows.
 
 # COMMAND ----------
 
@@ -140,11 +141,11 @@ except Exception as e:
 # >>> BLANK W3
 # Your code here
 # >>> SOLUTION W3
-spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_clone")
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_dev")
 spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_src")
 spark.sql("CREATE TABLE main.dbacademy_l03.wu3_src AS SELECT CAST(id AS INT) AS id FROM range(1, 6)")
-spark.sql("CREATE TABLE main.dbacademy_l03.wu3_clone DEEP CLONE main.dbacademy_l03.wu3_src")
-spark.sql("DELETE FROM main.dbacademy_l03.wu3_clone WHERE id <= 2")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu3_dev SHALLOW CLONE main.dbacademy_l03.wu3_src")
+spark.sql("DELETE FROM main.dbacademy_l03.wu3_dev WHERE id = 5")
 # <<< END W3
 
 # COMMAND ----------
@@ -152,230 +153,372 @@ spark.sql("DELETE FROM main.dbacademy_l03.wu3_clone WHERE id <= 2")
 # DBTITLE 1,W3 Validation
 try:
     src = spark.table("main.dbacademy_l03.wu3_src").count()
-    clone = spark.table("main.dbacademy_l03.wu3_clone").count()
-    first_op = (spark.sql("DESCRIBE HISTORY main.dbacademy_l03.wu3_clone")
-                .orderBy("version").first()["operation"])
-    WARMUP_PASSED["W3"] = src == 5 and clone == 3 and first_op == "CLONE"
-    print("✅ Passed" if WARMUP_PASSED["W3"] else
-          f"Hint: want source 5 rows, clone 3 rows, first clone operation CLONE; got {src}, {clone}, {first_op}.")
+    dev = spark.table("main.dbacademy_l03.wu3_dev").count()
+    first = spark.sql("DESCRIBE HISTORY main.dbacademy_l03.wu3_dev").orderBy("version").first()
+    is_shallow = first["operation"] == "CLONE" and first["operationParameters"].get("isShallow") == "true"
+    ok = src == 5 and dev == 4 and is_shallow
+    WARMUP_PASSED["W3"] = ok
+    print("✅ Passed" if ok else
+          f"Hint: want source 5 rows, clone 4 rows, first clone operation a SHALLOW CLONE; got {src}, {dev}, "
+          f"{first['operation']} {first['operationParameters']}.")
 except Exception as e:
     WARMUP_PASSED["W3"] = False
-    print("Hint: create wu3_src and wu3_clone first.", error_class(e))
+    print("Hint: create wu3_src and wu3_dev first.", error_class(e))
 
 # COMMAND ----------
 
 # DBTITLE 1,3 — Classroom Setup
 # Classroom setup: idempotent (drop the schema, recreate it), fake healthcare data only (no PHI).
-import json, random                                    # json builds the JSON lines; random makes fake values
+import random                                                   # isolated generator below, never random.seed()
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from pyspark.sql import Window, functions as F                  # used by the examples and the validation cells
 
 CATALOG, SCHEMA = "main", "dbacademy_l03"
-FQ = f"{CATALOG}.{SCHEMA}"                              # fully qualified schema name
-VOL = f"/Volumes/{CATALOG}/{SCHEMA}/data"               # Unity Catalog volume for all files
-CLAIMS_DIR = f"{VOL}/landing/claims_json"               # the clearinghouse drops claim files here
-PROVIDERS_DIR = f"{VOL}/landing/providers_csv"          # and the provider file here
-CHECKPOINTS = f"{VOL}/_checkpoints"                     # one sub-folder per streaming query
+FQ = f"{CATALOG}.{SCHEMA}"                                      # fully qualified schema name
+VOL = f"/Volumes/{CATALOG}/{SCHEMA}/data"                       # volume (used by the test build only)
 
-spark.sql(f"DROP SCHEMA IF EXISTS {FQ} CASCADE")        # removes warm-up tables, volume and files
+spark.sql(f"DROP SCHEMA IF EXISTS {FQ} CASCADE")                # removes the warm-up tables too
 spark.sql(f"CREATE SCHEMA {FQ}")
 spark.sql(f"CREATE VOLUME {FQ}.data")
 
-STATUSES = ["SUBMITTED", "APPROVED", "DENIED", "PENDING"]
+rng = random.Random(42)                                         # one isolated, seeded generator
+START = date(2025, 1, 1)
 
-def claim_row(claim_id):
-    """One fake claim. The generator is seeded per claim, so a claim always gets the same values."""
-    rng = random.Random(f"claim-{claim_id}")            # isolated generator (string seeds are deterministic)
-    return {"claim_id": claim_id,
-            "patient_id": rng.randint(1, 50),
-            "provider_id": rng.randint(1, 10),
-            "claim_amount": round(rng.uniform(50, 5000), 2),
-            "claim_status": rng.choice(STATUSES),
-            "service_date": f"2026-{rng.randint(1, 9):02d}-{rng.randint(1, 28):02d}"}
+# patients: 200 rows (patients 191-200 never get an encounter, patients 1-10 never get a lab)
+patients = [(pid, rng.choice(["F", "M"]), rng.randint(1940, 2010), rng.choice(["CA", "NY", "TX", "FL", "WA"]))
+            for pid in range(1, 201)]
 
-def land_claims(file_name, first_id, n, extra=None, bad_amount_ids=()):
-    """Write one newline-delimited JSON file with n claims into the landing folder."""
-    lines = []
-    for cid in range(first_id, first_id + n):
-        row = claim_row(cid)
-        if extra:
-            row.update(extra)                           # e.g. {"payer": "Medicare"}: a new column
-        if cid in bad_amount_ids:
-            row["claim_amount"] = "N/A"                 # a value that does not fit the DOUBLE type
-        lines.append(json.dumps(row))
-    dbutils.fs.put(f"{CLAIMS_DIR}/{file_name}", "\n".join(lines) + "\n", overwrite=True)
-    return n
+# providers: 20 rows, 5 specialties
+SPECIALTIES = ["Cardiology", "Endocrinology", "Family Medicine", "Emergency Medicine", "Oncology"]
+providers = [(pid, f"Dr Provider {pid}", SPECIALTIES[pid % 5]) for pid in range(1, 21)]
 
-# First delivery: 3 JSON files with 100 claims each
-for i in range(3):
-    land_claims(f"claims_{i + 1:03d}.json", first_id=i * 100 + 1, n=100)
+# diagnosis_codes: 7 real ICD-10 style codes + one row with a NULL code ("not coded")
+diagnosis_codes = [("E11.9", "Type 2 diabetes without complications", "Endocrine"),
+                   ("I10", "Essential hypertension", "Circulatory"),
+                   ("I50.9", "Heart failure, unspecified", "Circulatory"),
+                   ("J18.9", "Pneumonia, unspecified", "Respiratory"),
+                   ("N18.3", "Chronic kidney disease, stage 3", "Genitourinary"),
+                   ("R07.9", "Chest pain, unspecified", "Symptoms"),
+                   ("Z00.00", "General adult exam", "Factors"),
+                   (None, "Not coded", "Unknown")]
+CODES = [c[0] for c in diagnosis_codes if c[0]]
 
-# Provider reference file (CSV with a header row)
-rng = random.Random(42)
-specialties = ["Cardiology", "Neurology", "Oncology", "Pediatrics", "Orthopedics", "General"]
-csv_lines = ["provider_id,provider_name,specialty,npi"]
-for pid in range(1, 11):
-    csv_lines.append(f"{pid},Dr Provider {pid},{rng.choice(specialties)},{1000000000 + pid}")
-dbutils.fs.put(f"{PROVIDERS_DIR}/providers_001.csv", "\n".join(csv_lines) + "\n", overwrite=True)
+# encounters: 2000 rows; NULL patient_id every 100th, NULL provider every 125th, NULL code every 40th,
+# and every 50th encounter is a second visit of the previous patient on the same day (a tie on purpose)
+TYPES = ["OUTPATIENT"] * 6 + ["ER"] * 2 + ["INPATIENT"] * 2
+encounters = []
+for eid in range(1, 2001):
+    pid = None if eid % 100 == 0 else rng.randint(1, 190)
+    day = START + timedelta(days=rng.randint(0, 364))
+    if eid % 50 == 1 and eid > 1 and encounters[-1][1] is not None:
+        pid, day = encounters[-1][1], encounters[-1][4]        # same patient, same date as the previous row
+    etype = rng.choice(TYPES)
+    discharge = day + timedelta(days=rng.randint(1, 7)) if etype == "INPATIENT" else None
+    prov = None if eid % 125 == 0 else rng.randint(1, 20)
+    code = None if eid % 40 == 0 else rng.choice(CODES)
+    charge = Decimal(f"{rng.uniform(80, 3000):.2f}")
+    encounters.append((eid, pid, prov, etype, day, discharge, code, charge))
 
-# Check the files and record the real counts
-claim_files = [f.name for f in dbutils.fs.ls(CLAIMS_DIR)]
-claim_lines = spark.read.text(CLAIMS_DIR).count()       # one JSON object per line
-approved = spark.read.json(CLAIMS_DIR).filter("claim_status = 'APPROVED'").count()
-METRICS["setup.claim_files"] = len(claim_files)
-METRICS["setup.claim_rows"] = claim_lines
-METRICS["setup.approved"] = approved
-METRICS["setup.provider_rows"] = len(csv_lines) - 1
-assert claim_files == ["claims_001.json", "claims_002.json", "claims_003.json"], claim_files
-assert claim_lines == 300, claim_lines
-print(f"claim files: {claim_files}, claim rows: {claim_lines}, APPROVED: {approved}, providers: {len(csv_lines) - 1}")
-display(dbutils.fs.ls(CLAIMS_DIR))
+# claims: 1350 claims + 150 later versions of existing claims (same claim_id, later updated_at) = 1500 rows
+PAYERS = ["Medicare", "Medicaid", "Aetna", "BlueCross", None]   # None = self-pay
+claims = []
+for cid in range(1, 1351):
+    enc = encounters[rng.randint(0, 1999)]
+    updated = datetime.combine(enc[4], datetime.min.time()) + timedelta(days=rng.randint(1, 30), hours=8)
+    claims.append((cid, enc[0], enc[1], rng.choice(PAYERS), rng.choice(["SUBMITTED", "PAID", "DENIED", "PENDING"]),
+                   Decimal(f"{rng.uniform(50, 5000):.2f}"), enc[4], updated))
+for cid in rng.sample(range(1, 1351), 150):
+    old = claims[cid - 1]
+    claims.append(old[:4] + (rng.choice(["PAID", "DENIED"]), old[5], old[6], old[7] + timedelta(days=rng.randint(1, 20))))
+
+# lab_results: 3000 rows, patients 11-200 only, NULL patient_id every 150th, TSH only for patients with id % 5 = 0,
+# every result_ts is unique; A1C has one decimal, so equal values (ties) are common
+minutes = rng.sample(range(365 * 24 * 60), 3000)
+labs = []
+for lid in range(1, 3001):
+    pid = None if lid % 150 == 0 else rng.randint(11, 200)
+    test = rng.choice(["A1C", "LDL", "GLU", "TSH"] if pid is not None and pid % 5 == 0 else ["A1C", "LDL", "GLU"])
+    value = {"A1C": round(rng.uniform(4.5, 10.0), 1), "LDL": float(rng.randint(60, 200)),
+             "GLU": float(rng.randint(70, 250)), "TSH": round(rng.uniform(0.4, 5.0), 1)}[test]
+    labs.append((lid, pid, test, value, datetime(2025, 1, 1) + timedelta(minutes=minutes[lid - 1])))
+
+def save(rows, ddl, name):
+    """Write a list of tuples as a managed Delta table and return its row count."""
+    spark.createDataFrame(rows, ddl).write.saveAsTable(f"{FQ}.{name}")
+    return spark.table(f"{FQ}.{name}").count()
+
+n_patients = save(patients, "patient_id INT, gender STRING, birth_year INT, state STRING", "patients")
+n_providers = save(providers, "provider_id INT, provider_name STRING, specialty STRING", "providers")
+n_codes = save(diagnosis_codes, "code STRING, description STRING, category STRING", "diagnosis_codes")
+n_enc = save(encounters, "encounter_id INT, patient_id INT, provider_id INT, encounter_type STRING, "
+             "encounter_date DATE, discharge_date DATE, diagnosis_code STRING, charge DECIMAL(10,2)", "encounters")
+n_claims = save(claims, "claim_id INT, encounter_id INT, patient_id INT, payer STRING, status STRING, "
+                "amount DECIMAL(10,2), service_date DATE, updated_at TIMESTAMP", "claims")
+n_labs = save(labs, "lab_id INT, patient_id INT, test_code STRING, result_value DOUBLE, result_ts TIMESTAMP", "lab_results")
+
+counts = spark.sql(f"""
+    SELECT (SELECT count(DISTINCT claim_id) FROM {FQ}.claims)                          AS distinct_claims,
+           (SELECT count(*) FROM {FQ}.encounters WHERE patient_id IS NULL)              AS enc_null_patient,
+           (SELECT count(*) FROM {FQ}.encounters WHERE provider_id IS NULL)             AS enc_null_provider,
+           (SELECT count(*) FROM {FQ}.encounters WHERE diagnosis_code IS NULL)          AS enc_null_code,
+           (SELECT count(*) FROM {FQ}.lab_results WHERE patient_id IS NULL)             AS lab_null_patient,
+           (SELECT count(*) FROM {FQ}.encounters WHERE encounter_type = 'INPATIENT')    AS inpatient,
+           (SELECT count(*) FROM {FQ}.claims WHERE payer IS NULL)                       AS claims_self_pay
+""").first()
+display(spark.sql(f"""
+    SELECT 'patients' AS table_name, count(*) AS row_count FROM {FQ}.patients UNION ALL
+    SELECT 'providers', count(*) FROM {FQ}.providers UNION ALL
+    SELECT 'diagnosis_codes', count(*) FROM {FQ}.diagnosis_codes UNION ALL
+    SELECT 'encounters', count(*) FROM {FQ}.encounters UNION ALL
+    SELECT 'claims', count(*) FROM {FQ}.claims UNION ALL
+    SELECT 'lab_results', count(*) FROM {FQ}.lab_results"""))
+print(counts.asDict())
+METRICS["setup.patients"], METRICS["setup.providers"], METRICS["setup.codes"] = n_patients, n_providers, n_codes
+METRICS["setup.encounters"], METRICS["setup.claims"], METRICS["setup.labs"] = n_enc, n_claims, n_labs
+METRICS["setup.distinct_claims"] = counts["distinct_claims"]
+METRICS["setup.enc_null_patient"] = counts["enc_null_patient"]
+METRICS["setup.enc_null_provider"] = counts["enc_null_provider"]
+METRICS["setup.enc_null_code"] = counts["enc_null_code"]
+METRICS["setup.lab_null_patient"] = counts["lab_null_patient"]
+METRICS["setup.inpatient"] = counts["inpatient"]
+METRICS["setup.claims_self_pay"] = counts["claims_self_pay"]
+assert (n_patients, n_providers, n_codes, n_enc, n_claims, n_labs) == (200, 20, 8, 2000, 1500, 3000)
+assert counts["distinct_claims"] == 1350 and counts["enc_null_patient"] == 20 and counts["lab_null_patient"] == 20
+assert counts["enc_null_provider"] == 16 and counts["enc_null_code"] == 50
 
 # COMMAND ----------
 
 # DBTITLE 1,3 — Setup explained
 # MAGIC %md
-# MAGIC **Setup result (real run):** {{setup.claim_files}} JSON files with {{setup.claim_rows}} claims in total ({{setup.approved}} of them `APPROVED`), and one CSV file with {{setup.provider_rows}} providers.
+# MAGIC **Setup result (real run):**
 # MAGIC
-# MAGIC The helper `land_claims(file_name, first_id, n, extra=None, bad_amount_ids=())` writes one more JSON file into the landing folder. The examples call it to simulate new deliveries:
-# MAGIC * `extra={"payer": "Medicare"}` adds a **new column**;
-# MAGIC * `bad_amount_ids=(…)` writes `"N/A"` into `claim_amount` for those claims (a **type mismatch**).
+# MAGIC | Table | Rows | Traps built in on purpose |
+# MAGIC | --- | --- | --- |
+# MAGIC | `patients` | {{setup.patients}} | patients 191–200 have no encounter, patients 1–10 have no lab result |
+# MAGIC | `providers` | {{setup.providers}} | 5 specialties |
+# MAGIC | `diagnosis_codes` | {{setup.codes}} | one reference row has `code = NULL` ("Not coded") |
+# MAGIC | `encounters` | {{setup.encounters}} ({{setup.inpatient}} `INPATIENT`) | `patient_id` NULL {{setup.enc_null_patient}}×, `provider_id` NULL {{setup.enc_null_provider}}×, `diagnosis_code` NULL {{setup.enc_null_code}}×; every 50th encounter is a second visit of the same patient on the same day (a tie) |
+# MAGIC | `claims` | {{setup.claims}} rows, {{setup.distinct_claims}} distinct `claim_id` | later versions of the same claim with a newer `updated_at`; `payer` NULL (self-pay) in {{setup.claims_self_pay}} rows |
+# MAGIC | `lab_results` | {{setup.labs}} | `patient_id` NULL {{setup.lab_null_patient}}×; TSH only for patients with `patient_id % 5 = 0`; A1C has one decimal, so equal values are common |
+# MAGIC
+# MAGIC The data comes from one seeded generator (`random.Random(42)`), so every run creates the same rows.
 
 # COMMAND ----------
 
-# DBTITLE 1,4.1 Concept — Three ways to load files
+# DBTITLE 1,4.1 Concept — Logical order of a query
 # MAGIC %md
 # MAGIC ## 4 Concepts
 # MAGIC
-# MAGIC ### 4.1 Three ways to load files: `read_files`, `COPY INTO`, Auto Loader
+# MAGIC ### 4.1 The logical order of a query
 # MAGIC
-# MAGIC **What.** All three read files (JSON, CSV, Parquet, …) from cloud storage or a Unity Catalog volume.
+# MAGIC **What.** You write `SELECT … FROM … WHERE …`, but the engine thinks about the clauses in a different order. This is the standard SQL logical order. The Databricks *SELECT* reference lists the clauses but does not print this order; E4 shows its effects with real errors.
 # MAGIC
-# MAGIC **Why three?** They answer different questions:
-# MAGIC * `read_files` — "What is in these files right now?" A table-valued SQL function. Every query reads the files again.
-# MAGIC * `COPY INTO` — "Load the files I have not loaded yet into this table." A SQL command that remembers loaded files.
-# MAGIC * Auto Loader — "Keep loading new files as they arrive." A Structured Streaming source (`format("cloudFiles")`).
+# MAGIC | Step | Clause | What it can see |
+# MAGIC | --- | --- | --- |
+# MAGIC | 1 | `FROM` + `JOIN` | the tables |
+# MAGIC | 2 | `WHERE` | single rows ("Filters the result of the `FROM` clause", *SELECT* reference) — **no** aggregates, **no** window functions |
+# MAGIC | 3 | `GROUP BY` | groups |
+# MAGIC | 4 | `HAVING` | groups ("filter rows after the grouping is performed") — aggregates are allowed |
+# MAGIC | 5 | window functions (`OVER`) | the rows that survived steps 1–4 |
+# MAGIC | 6 | `QUALIFY` | the result of window functions ("Filters the results of window functions", *QUALIFY clause*) |
+# MAGIC | 7 | `SELECT` (+ `DISTINCT`) | the final columns |
+# MAGIC | 8 | `ORDER BY`, `LIMIT` | the final result |
 # MAGIC
-# MAGIC **When to use which**
+# MAGIC One practical exception: Databricks lets `QUALIFY` use an alias from the `SELECT` list (the *QUALIFY clause* example ends with `QUALIFY rank = 1`).
 # MAGIC
-# MAGIC | | `read_files` | `COPY INTO` | Auto Loader |
+# MAGIC **Why it matters.** It explains three classic errors: a window function in `WHERE`, an aggregate in `WHERE`, and a window function that "does not see" rows that `WHERE` removed.
+# MAGIC
+# MAGIC **CTE (common table expression).** `WITH name AS (subquery)` gives a subquery a name: "one or more named queries which can be reused multiple times within the main query block" (*Query* reference). Use CTEs instead of deep nesting; dbt models are full of them.
+# MAGIC
+# MAGIC ```sql
+# MAGIC WITH er AS (SELECT * FROM main.dbacademy_l03.encounters WHERE encounter_type = 'ER')
+# MAGIC SELECT patient_id, count(*) AS er_visits FROM er GROUP BY patient_id HAVING count(*) >= 3;
+# MAGIC ```
+
+# COMMAND ----------
+
+# DBTITLE 1,4.2 Concept — Joins
+# MAGIC %md
+# MAGIC ### 4.2 Joins
+# MAGIC
+# MAGIC Source: *JOIN* (SQL reference). `join_type: { [ INNER ] | LEFT [ OUTER ] | [ LEFT ] SEMI | RIGHT [ OUTER ] | FULL [ OUTER ] | [ LEFT ] ANTI | CROSS }`
+# MAGIC
+# MAGIC | Join | Returns | Typical healthcare question |
+# MAGIC | --- | --- | --- |
+# MAGIC | `INNER` (default) | "rows that have matching values in both table references" | encounters with their provider |
+# MAGIC | `LEFT [OUTER]` | all left rows, NULLs where the right has no match | all patients, with their claims if any |
+# MAGIC | `RIGHT`, `FULL [OUTER]` | all right rows / all rows of both sides | reconcile two claim feeds |
+# MAGIC | `LEFT SEMI` | left rows **that have** a match; only left columns, **no duplicates** | patients who had an ER visit |
+# MAGIC | `LEFT ANTI` | left rows **with no** match | patients who never had a visit |
+# MAGIC | `CROSS` | "the Cartesian product of two relations" | every provider × every month (a calendar grid) |
+# MAGIC
+# MAGIC **SEMI / ANTI vs alternatives**
+# MAGIC
+# MAGIC | Need | Best | Alternative | Risk of the alternative |
 # MAGIC | --- | --- | --- | --- |
-# MAGIC | Type | batch query (or `STREAM read_files` in a pipeline) | batch SQL command | streaming source |
-# MAGIC | Remembers loaded files? | no | yes — "Files in the source location that have already been loaded are skipped" (*COPY INTO* reference) | yes — file metadata in RocksDB in the checkpoint, "processed exactly once" (*What is Auto Loader?*) |
-# MAGIC | Scale (*Ingest data from cloud object storage* page) | — | "files in the order of thousands" | "files in the order of millions or more" |
-# MAGIC | Schema change | inferred on every read | `COPY_OPTIONS ('mergeSchema' = 'true')` | `cloudFiles.schemaEvolutionMode` |
-# MAGIC | Language | SQL | SQL | Python/Scala; SQL inside Lakeflow pipelines |
-# MAGIC
-# MAGIC **Sources** (*What is Auto Loader?*): Amazon S3 `s3://`, ADLS `abfss://`, Google Cloud Storage `gs://`, Azure Blob Storage `wasbs://`, and Unity Catalog volumes `/Volumes/`.
-# MAGIC **Formats:** `JSON`, `CSV`, `XML`, `PARQUET`, `AVRO`, `ORC`, `TEXT`, `BINARYFILE`.
-# MAGIC
-# MAGIC > **NOT VERIFIED — concept only (no storage credential or external location of our own on this workspace):** loading from `s3://`, `abfss://` or `gs://` paths. This lesson uses a Unity Catalog volume only.
-
-# COMMAND ----------
-
-# DBTITLE 1,4.2 Concept — read_files
-# MAGIC %md
-# MAGIC ### 4.2 `read_files` — query files with SQL
-# MAGIC
-# MAGIC **What.** A table-valued function: `read_files(path [, option_key => option_value ] [...])`. Options use **named parameters** (`=>`). Source: *read_files table-valued function* (SQL reference).
-# MAGIC
-# MAGIC **Why.** You can look at raw files before you build a table, and you can create a table from files in one statement (`CREATE TABLE … AS SELECT * FROM read_files(…)`).
-# MAGIC
-# MAGIC **Important options**
-# MAGIC
-# MAGIC | Option | Meaning (docs) |
-# MAGIC | --- | --- |
-# MAGIC | `format` | file format; "Auto-inferred if omitted" |
-# MAGIC | `schema` | a DDL string, e.g. `'id int, ts timestamp'` |
-# MAGIC | `schemaHints` | override the type of some columns during inference |
-# MAGIC | `inferColumnTypes` | default `true` (Auto Loader's default is different, see 4.4) |
-# MAGIC | `header`, `sep`, … | format options of the DataFrame reader, e.g. for CSV |
-# MAGIC
-# MAGIC The hidden `_metadata` column gives file information, for example `_metadata.file_path` and `_metadata.file_name`.
+# MAGIC | "has at least one match" | `LEFT SEMI JOIN` or `EXISTS` | `INNER JOIN` + `DISTINCT` | duplicates if you forget `DISTINCT` (E2) |
+# MAGIC | "has no match" | `LEFT ANTI JOIN` or `NOT EXISTS` | `NOT IN (subquery)` | returns **nothing** if the subquery has a NULL (E1) |
 # MAGIC
 # MAGIC ```sql
-# MAGIC SELECT *, _metadata.file_name
-# MAGIC FROM read_files('/Volumes/main/dbacademy_l03/data/landing/claims_json', format => 'json');
+# MAGIC SELECT p.* FROM main.dbacademy_l03.patients p
+# MAGIC LEFT ANTI JOIN main.dbacademy_l03.encounters e ON p.patient_id = e.patient_id;
 # MAGIC ```
 # MAGIC ```python
-# MAGIC spark.read.format("json").load("/Volumes/main/dbacademy_l03/data/landing/claims_json")   # PySpark batch read
+# MAGIC patients.join(encounters, "patient_id", "left_anti")        # how: inner, left, right, full, left_semi, left_anti, cross
+# MAGIC patients.crossJoin(months)
 # MAGIC ```
 
 # COMMAND ----------
 
-# DBTITLE 1,4.3 Concept — COPY INTO
+# DBTITLE 1,4.3 Concept — NULL semantics
 # MAGIC %md
-# MAGIC ### 4.3 `COPY INTO` — idempotent batch load
+# MAGIC ### 4.3 NULL semantics
 # MAGIC
-# MAGIC **What.** A SQL command that loads files into an existing Delta table. Source: *COPY INTO* (SQL reference).
+# MAGIC Source: *NULL semantics* (SQL reference).
 # MAGIC
-# MAGIC **Why.** It is "a retryable and idempotent operation": if you run it again, files that were already loaded are skipped. You can schedule it every hour and only new files are loaded.
+# MAGIC | Rule | Quote from the page |
+# MAGIC | --- | --- |
+# MAGIC | `=` with a NULL is UNKNOWN, so a join on `=` never matches NULL keys | — (E3 shows it) |
+# MAGIC | `<=>` is the null-safe equal | it "returns `False` when one of the operand is `NULL`" and "`True` when both the operands are `NULL`" |
+# MAGIC | `NOT IN` with a NULL in the list | "`NOT IN` always returns `UNKNOWN` when the list contains `NULL` and does not contain the input value" |
+# MAGIC | aggregates skip NULLs | "`NULL` values are ignored from processing by all the aggregate functions", except `count(*)` |
+# MAGIC | `GROUP BY`, `DISTINCT` | NULLs are "grouped together into the same bucket" |
+# MAGIC | set operators | "`NULL` values are compared in a null-safe manner for equality in the context of set operations" |
 # MAGIC
-# MAGIC **When.** Thousands of files, SQL-only teams, or when you sometimes need to re-load a few files (`COPY_OPTIONS ('force' = 'true')` turns idempotency off).
+# MAGIC **NULL functions:** `coalesce(a, b, …)` (first non-NULL), `nvl(a, b)` / `ifnull(a, b)`, `nullif(a, b)` (NULL if equal), `a IS [NOT] NULL`, `a IS [NOT] DISTINCT FROM b` (same as `<=>`).
+# MAGIC
+# MAGIC ```python
+# MAGIC encounters.join(codes, encounters.diagnosis_code.eqNullSafe(codes.code))   # PySpark version of <=>
+# MAGIC F.coalesce("payer", F.lit("SELF-PAY"))
+# MAGIC ```
+
+# COMMAND ----------
+
+# DBTITLE 1,4.4 Concept — Aggregation
+# MAGIC %md
+# MAGIC ### 4.4 Aggregation: GROUP BY, HAVING, FILTER, COUNT variants, subtotals
+# MAGIC
+# MAGIC Source: *GROUP BY clause* (SQL reference).
+# MAGIC
+# MAGIC | Tool | Meaning |
+# MAGIC | --- | --- |
+# MAGIC | `GROUP BY ALL` | "A shorthand notation to add all `SELECT`-list expressions not containing aggregate functions as `group_expression`s" |
+# MAGIC | `HAVING` | filter groups (after `GROUP BY`) |
+# MAGIC | `agg(...) FILTER (WHERE cond)` | "only the matching rows are passed to that function" |
+# MAGIC | `count(*)` / `count(col)` / `count(DISTINCT col)` | all rows / non-NULL values / distinct non-NULL values |
+# MAGIC | `count_if(cond)` | rows where `cond` is true |
+# MAGIC | `approx_count_distinct(col [, relativeSD])` | fast estimate, "accurate within a default value of 5%" (*approx_count_distinct* page) |
+# MAGIC | `GROUPING SETS ((a, b), (a), ())` | several groupings in one query, like a `UNION ALL` of the aggregations |
+# MAGIC | `ROLLUP(a, b)` | = `GROUPING SETS((a, b), (a), ())`: "N elements … result in N+1 `GROUPING SETS`" |
+# MAGIC | `CUBE(a, b)` | = `GROUPING SETS((a, b), (a), (b), ())`: "2^N `GROUPING SETS`" |
+# MAGIC | `grouping(col)` | 1 if `col` is aggregated away in this row (a subtotal row), else 0 |
+# MAGIC
+# MAGIC **FILTER vs CASE.** `count(*) FILTER (WHERE status = 'DENIED')` = `count_if(status = 'DENIED')` = `sum(CASE WHEN status = 'DENIED' THEN 1 ELSE 0 END)`. For averages, `ELSE 0` is a bug: the zeros are counted (E12).
 # MAGIC
 # MAGIC ```sql
-# MAGIC CREATE TABLE IF NOT EXISTS main.dbacademy_l03.claims_copy;     -- a table with no columns yet
-# MAGIC COPY INTO main.dbacademy_l03.claims_copy
-# MAGIC FROM '/Volumes/main/dbacademy_l03/data/landing/claims_json'
-# MAGIC FILEFORMAT = JSON
-# MAGIC COPY_OPTIONS ('mergeSchema' = 'true');                         -- let the first load create the columns
+# MAGIC SELECT payer, status, count(*) AS claims
+# MAGIC FROM main.dbacademy_l03.claims_clean
+# MAGIC GROUP BY ROLLUP (payer, status);
 # MAGIC ```
-# MAGIC Other clauses: `FILES = ('a.json', …)` or `PATTERN = '*.json'` (not both), `FORMAT_OPTIONS (…)` for reader options such as `'header' = 'true'`.
-# MAGIC
-# MAGIC PySpark has no `COPY INTO` API. Run it with `spark.sql("COPY INTO …")`.
+# MAGIC ```python
+# MAGIC claims.groupBy("payer").agg(F.count("*"), F.count_if(F.col("status") == "DENIED"), F.approx_count_distinct("patient_id"))
+# MAGIC claims.rollup("payer", "status").count()        # also: claims.cube("payer", "status")
+# MAGIC ```
 
 # COMMAND ----------
 
-# DBTITLE 1,4.4 Concept — Auto Loader
+# DBTITLE 1,4.5 Concept — Window functions and QUALIFY
 # MAGIC %md
-# MAGIC ### 4.4 Auto Loader — incremental loading with `cloudFiles`
+# MAGIC ### 4.5 Window functions and QUALIFY
 # MAGIC
-# MAGIC **What.** A Structured Streaming source. It finds new files in a folder and loads each file once. Source: *What is Auto Loader?*
+# MAGIC **What.** A window function computes a value for **each row** from a group of related rows (the *window*), without collapsing the rows like `GROUP BY` does. Source: *Window functions* (SQL reference).
 # MAGIC
-# MAGIC **Two locations you must give it**
+# MAGIC `function(...) OVER (PARTITION BY … ORDER BY … [frame])`
 # MAGIC
-# MAGIC | Option | What is stored there |
+# MAGIC | Family | Functions | Notes |
+# MAGIC | --- | --- | --- |
+# MAGIC | Ranking | `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `PERCENT_RANK`, `CUME_DIST` | need `ORDER BY`, no frame ("must include an ORDER BY clause, but not a window_frame clause") |
+# MAGIC | Analytic | `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE` | `lag(expr [, offset [, default]]) [IGNORE NULLS]`; offset default 1, default value NULL (*lag function*) |
+# MAGIC | Aggregate | `SUM`, `AVG`, `COUNT`, `MIN`, `MAX` … `OVER (...)` | running totals, moving averages |
+# MAGIC
+# MAGIC **Frames.** Source: *Window frame clause*. `{ RANGE | ROWS } BETWEEN frame_start AND frame_end`.
+# MAGIC * `ROWS` counts physical rows before/after the current row.
+# MAGIC * `RANGE` works on the `ORDER BY` value: "Unlike ROWS mode, RANGE groups rows with equal `ORDER BY` values together."
+# MAGIC * The docs page does not state the frame you get when you write **no** frame. E6 measures it on this workspace.
+# MAGIC
+# MAGIC **QUALIFY** filters on window results, like `HAVING` filters on aggregates. Syntax: `QUALIFY boolean_expression` (*QUALIFY clause*).
+# MAGIC
+# MAGIC | Need | Use | Not |
+# MAGIC | --- | --- | --- |
+# MAGIC | one row per key (dedup) | `QUALIFY ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) = 1` | `RANK()` (keeps all ties), `GROUP BY` (loses other columns) |
+# MAGIC | "top 3 values, with ties" | `DENSE_RANK() <= 3` | `ROW_NUMBER() <= 3` |
+# MAGIC | running total | `SUM(x) OVER (… ORDER BY d, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | no frame + ties in `d` |
+# MAGIC
+# MAGIC ```sql
+# MAGIC SELECT * FROM main.dbacademy_l03.claims
+# MAGIC QUALIFY ROW_NUMBER() OVER (PARTITION BY claim_id ORDER BY updated_at DESC) = 1;
+# MAGIC ```
+# MAGIC ```python
+# MAGIC from pyspark.sql import Window, functions as F
+# MAGIC w = Window.partitionBy("claim_id").orderBy(F.col("updated_at").desc())
+# MAGIC claims.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
+# MAGIC running = Window.partitionBy("patient_id").orderBy("encounter_date", "encounter_id").rowsBetween(Window.unboundedPreceding, Window.currentRow)
+# MAGIC ```
+
+# COMMAND ----------
+
+# DBTITLE 1,4.6 Concept — Set operators, PIVOT and UNPIVOT
+# MAGIC %md
+# MAGIC ### 4.6 Set operators, PIVOT and UNPIVOT
+# MAGIC
+# MAGIC **Set operators** (*Set operators* reference): `UNION`, `INTERSECT`, `EXCEPT` (synonym `MINUS`). **`DISTINCT` is the default** for all three; add `ALL` to keep duplicates. Columns are matched **by position**: "Both subqueries must have the same number of columns and share a least common type for each respective column". `INTERSECT` binds more tightly than `UNION` and `EXCEPT`.
+# MAGIC
+# MAGIC | Need | Use |
 # MAGIC | --- | --- |
-# MAGIC | `checkpointLocation` (on the writer) | stream progress, including which files were loaded (RocksDB) |
-# MAGIC | `cloudFiles.schemaLocation` (on the reader) | the inferred schema and its later versions, in a `_schemas` folder (*Configure schema inference and evolution in Auto Loader*) |
+# MAGIC | stack two feeds, keep every row | `UNION ALL` (no shuffle for dedup, so cheaper) |
+# MAGIC | list of distinct ids from two tables | `UNION` |
+# MAGIC | in both / in the first only | `INTERSECT` / `EXCEPT` |
 # MAGIC
-# MAGIC Many teams use the same folder for both.
+# MAGIC **PIVOT** (rows → columns, *PIVOT clause*): `PIVOT ( aggregate_expression [AS alias] FOR column IN (value [AS alias], …) )`. Every column of the input that is not in the aggregate or the `FOR` column becomes a **grouping column**, so select only the columns you need first. The `IN` values must be literals.
 # MAGIC
-# MAGIC **Type inference.** "For formats that don't encode data types (JSON, CSV, and XML), Auto Loader infers all columns as strings" unless you set `cloudFiles.inferColumnTypes` to `true`. Inference samples "the first 50 GB or 1000 files that it discovers, whichever limit is crossed first."
-# MAGIC
-# MAGIC **File detection.** "By default, Auto Loader uses directory listing mode." Databricks recommends file notification mode with file events for most workloads.
-# MAGIC
-# MAGIC > **NOT VERIFIED — concept only (needs a cloud storage location with file events; we only have a volume):** file notification / file events mode.
+# MAGIC **UNPIVOT** (columns → rows, *UNPIVOT clause*): `UNPIVOT [ INCLUDE NULLS | EXCLUDE NULLS ] (value_col FOR name_col IN (col [AS alias], …))`. "The default is `EXCLUDE NULLS`."
 # MAGIC
 # MAGIC ```python
-# MAGIC (spark.readStream
-# MAGIC     .format("cloudFiles")                                   # Auto Loader
-# MAGIC     .option("cloudFiles.format", "json")                    # format of the files
-# MAGIC     .option("cloudFiles.schemaLocation", ckpt)              # where the inferred schema is kept
-# MAGIC     .load(landing_dir)
-# MAGIC  .writeStream
-# MAGIC     .option("checkpointLocation", ckpt)                     # which files were loaded
-# MAGIC     .trigger(availableNow=True)                             # load everything new, then stop
-# MAGIC     .toTable("main.dbacademy_l03.claims_bronze"))
+# MAGIC labs.groupBy("patient_id").pivot("test_code", ["A1C", "LDL"]).agg(F.avg("result_value"))     # PIVOT
+# MAGIC wide.unpivot("patient_id", ["a1c", "ldl"], "test_code", "avg_value")                            # UNPIVOT (drops nothing)
 # MAGIC ```
-# MAGIC SQL: inside a Lakeflow pipeline, `CREATE OR REFRESH STREAMING TABLE t AS SELECT * FROM STREAM read_files('…')` (*read_files* reference). That is a later lesson.
 
 # COMMAND ----------
 
-# DBTITLE 1,4.5 Concept — Schema evolution and rescued data
+# DBTITLE 1,4.7 Concept — Higher-order functions, dates, CASE
 # MAGIC %md
-# MAGIC ### 4.5 Schema evolution and the rescued data column
+# MAGIC ### 4.7 Arrays and higher-order functions, dates, CASE
 # MAGIC
-# MAGIC **What.** Source files change: a new column appears, or a value does not fit the column type. Auto Loader decides what to do with `cloudFiles.schemaEvolutionMode`. Source: *Configure schema inference and evolution in Auto Loader*.
+# MAGIC **Arrays.** `collect_list(x)` (keeps duplicates) and `collect_set(x)` (distinct) build an array per group. The order inside the array is not guaranteed: wrap it in `array_sort(...)` when order matters.
 # MAGIC
-# MAGIC | Mode | When a new column appears |
+# MAGIC **Higher-order functions** take a lambda `x -> expression`:
+# MAGIC
+# MAGIC | Function | Result |
 # MAGIC | --- | --- |
-# MAGIC | `addNewColumns` (default when you give **no** schema) | "the stream stops with an `UnknownFieldException`"; the new column is added to the schema first, so a **restart** continues with the new schema |
-# MAGIC | `rescue` | the schema never changes and the stream does not fail; the new column goes into the rescued data column |
-# MAGIC | `failOnNewColumns` | the stream fails and does not continue until you change the schema or remove the file |
-# MAGIC | `none` (default when you **give** a schema) | the stream does not fail; new columns are ignored |
+# MAGIC | `transform(arr, x -> f(x))` | a new array with `f` applied to each element |
+# MAGIC | `filter(arr, x -> cond)` | only the elements where `cond` is true |
+# MAGIC | `exists(arr, x -> cond)` / `forall(...)` | true if any / all elements match |
+# MAGIC | `aggregate(arr, start, (acc, x) -> merge [, acc -> finish])` | fold the array into one value; "a synonym for reduce function" (*aggregate function* page) |
 # MAGIC
-# MAGIC **Rescued data column `_rescued_data`.** Auto Loader adds it automatically. It holds "a JSON blob with the rescued columns and the source file path of the record": columns that are not in the schema, values with the wrong type, and columns with different upper/lower case.
+# MAGIC **Why.** You work on the array inside one row: no `explode` and no second `GROUP BY`.
 # MAGIC
-# MAGIC **Why it matters.** With rescued data, a bad value never stops the pipeline, and no data is lost: you can fix it later from `_rescued_data`.
+# MAGIC **Dates.** `datediff(endDate, startDate)` — **end first** (*datediff function*: `datediff('2009-07-31', '2009-07-30')` is 1). Others: `date_add(d, n)`, `add_months(d, n)`, `trunc(d, 'MONTH')` (a `DATE`), `date_trunc('MONTH', ts)` (a `TIMESTAMP`), `year(d)`, `current_date()`.
+# MAGIC
+# MAGIC **CASE.** `CASE WHEN cond THEN a [WHEN …] [ELSE b] END`. Without `ELSE`, no match gives NULL — which is what you want inside `avg(...)` and `count(...)`.
+# MAGIC
+# MAGIC ```python
+# MAGIC F.transform("a1c_values", lambda v: F.round(v, 0))         # PySpark higher-order functions take Python lambdas
+# MAGIC F.filter("a1c_values", lambda v: v >= 6.5)
+# MAGIC F.aggregate("a1c_values", F.lit(0.0), lambda acc, v: acc + v)
+# MAGIC F.when(F.col("status") == "PAID", F.col("amount"))          # CASE WHEN … THEN … END
+# MAGIC F.datediff("encounter_date", "prev_date")
+# MAGIC ```
 
 # COMMAND ----------
 
@@ -385,43 +528,72 @@ display(dbutils.fs.ls(CLAIMS_DIR))
 # MAGIC
 # MAGIC Each example: **Predict** (answer before you run) → **code** (every line commented) → **Explained** (real numbers from the run).
 # MAGIC
-# MAGIC The examples build on each other: files that one example lands are still there for the next one. Run them in order.
+# MAGIC E4 creates the table `claims_clean` that E8 and E12 use, and E9 creates `lab_wide`. Run the examples in order.
 
 # COMMAND ----------
 
 # DBTITLE 1,E1 Predict
 # MAGIC %md
-# MAGIC ### E1 — `read_files` on JSON files
+# MAGIC ### E1 — Patients with no encounter: `NOT IN` vs `NOT EXISTS` vs `LEFT ANTI JOIN`
 # MAGIC
 # MAGIC **Predict:**
-# MAGIC 1. Which type will `read_files` give `claim_amount` and `service_date`: `STRING`, `DOUBLE`, `DATE`?
-# MAGIC 2. Will there be an extra column that is not in the JSON files?
-# MAGIC 3. How many rows does each file have?
+# MAGIC 1. In the setup, patients 191–200 never got an encounter, and 20 encounters have `patient_id = NULL`. How many rows does `WHERE patient_id NOT IN (SELECT patient_id FROM encounters)` return?
+# MAGIC 2. How many rows do `LEFT ANTI JOIN` and `NOT EXISTS` return?
+# MAGIC 3. What is `5 NOT IN (1, 2, NULL)`: true, false or NULL?
 
 # COMMAND ----------
 
 # DBTITLE 1,E1 Code
-claims_query = f"SELECT * FROM read_files('{CLAIMS_DIR}', format => 'json')"   # all JSON files in the folder
-e1 = spark.sql(claims_query)                                   # a normal DataFrame; nothing is stored
-display(spark.sql(f"DESCRIBE QUERY {claims_query}"))          # column names and inferred types
-display(e1.orderBy("claim_id").limit(5))                       # first rows
+def show_value(v):
+    """Text for a value from a query result: NULL for None."""
+    return "NULL" if v is None else str(v)
 
-per_file = spark.sql(f"""
-    SELECT _metadata.file_name AS file_name, count(*) AS row_count     -- _metadata: hidden file column
-    FROM read_files('{CLAIMS_DIR}', format => 'json')
-    GROUP BY ALL
-    ORDER BY file_name""")
-display(per_file)                                              # rows per file
+truth = spark.sql("SELECT 5 NOT IN (1, 2, NULL) AS with_null, 5 NOT IN (1, 2) AS without_null")   # the core rule
+display(truth)                                                   # one row, two columns
+t_row = truth.first()                                            # keep the values for the explanation
 
-types = dict(e1.dtypes)                                        # {column: type}
-METRICS["E1.rows"] = e1.count()
-METRICS["E1.columns"] = ", ".join(e1.columns)
-METRICS["E1.type_claim_id"] = types["claim_id"]
-METRICS["E1.type_claim_amount"] = types["claim_amount"]
-METRICS["E1.type_service_date"] = types["service_date"]
-METRICS["E1.files"] = per_file.count()
-METRICS["E1.rows_per_file"] = ", ".join(str(r["row_count"]) for r in per_file.collect())
-assert METRICS["E1.rows"] == 300 and METRICS["E1.files"] == 3
+not_in = spark.sql(f"""
+    SELECT patient_id                                            -- patients ...
+    FROM {FQ}.patients
+    WHERE patient_id NOT IN (SELECT patient_id                   -- ... whose id is not in this list
+                             FROM {FQ}.encounters)               -- the list contains 20 NULLs
+""")
+display(not_in)                                                  # how many rows?
+
+anti = spark.sql(f"""
+    SELECT p.patient_id                                          -- only left-side columns are allowed
+    FROM {FQ}.patients p
+    LEFT ANTI JOIN {FQ}.encounters e                             -- keep left rows that have NO match
+      ON p.patient_id = e.patient_id                             -- NULL keys never match, so they do no harm
+    ORDER BY p.patient_id
+""")
+display(anti)                                                    # the patients without an encounter
+
+not_exists = spark.sql(f"""
+    SELECT p.patient_id
+    FROM {FQ}.patients p
+    WHERE NOT EXISTS (SELECT 1 FROM {FQ}.encounters e            -- correlated subquery
+                      WHERE e.patient_id = p.patient_id)         -- same logic as the anti join
+""")
+not_in_fixed = spark.sql(f"""
+    SELECT patient_id FROM {FQ}.patients
+    WHERE patient_id NOT IN (SELECT patient_id FROM {FQ}.encounters
+                             WHERE patient_id IS NOT NULL)       -- remove the NULLs, then NOT IN works
+""")
+anti_py = (spark.table(f"{FQ}.patients")                         # the same anti join in PySpark
+           .join(spark.table(f"{FQ}.encounters"), "patient_id", "left_anti"))
+
+n_not_in, n_anti, n_not_exists = not_in.count(), anti.count(), not_exists.count()   # count each result
+n_fixed, n_anti_py = not_in_fixed.count(), anti_py.count()
+anti_ids = [r["patient_id"] for r in anti.collect()]             # which patients
+print(f"NOT IN {n_not_in}, LEFT ANTI {n_anti}, NOT EXISTS {n_not_exists}, NOT IN without NULLs {n_fixed}, PySpark {n_anti_py}")
+METRICS["E1.truth_with_null"] = show_value(t_row["with_null"])
+METRICS["E1.truth_without_null"] = show_value(t_row["without_null"])
+METRICS["E1.not_in_rows"], METRICS["E1.anti_rows"], METRICS["E1.not_exists_rows"] = n_not_in, n_anti, n_not_exists
+METRICS["E1.not_in_fixed_rows"], METRICS["E1.anti_py_rows"] = n_fixed, n_anti_py
+METRICS["E1.anti_ids"] = f"{anti_ids[0]}–{anti_ids[-1]}"
+assert n_anti == 10 and n_not_exists == 10 and n_fixed == 10 and n_anti_py == 10
+assert anti_ids == list(range(191, 201))
 
 # COMMAND ----------
 
@@ -429,48 +601,66 @@ assert METRICS["E1.rows"] == 300 and METRICS["E1.files"] == 3
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * `read_files` returned **{{E1.rows}}** rows from **{{E1.files}}** files ({{E1.rows_per_file}} rows per file, from `_metadata.file_name`).
-# MAGIC * Columns: `{{E1.columns}}`. They come in alphabetical order, not in the order of the JSON keys.
-# MAGIC * The last column, `_rescued_data`, is not in the files. `read_files` adds a rescued data column by default (*read_files* reference).
-# MAGIC * Inferred types: `claim_id` = `{{E1.type_claim_id}}`, `claim_amount` = `{{E1.type_claim_amount}}`, `service_date` = `{{E1.type_service_date}}`. `read_files` infers types (`inferColumnTypes` is `true` by default), but the date text `"2026-03-05"` stays a string. Use `schemaHints => 'service_date DATE'` or a cast if you need a date.
+# MAGIC * `5 NOT IN (1, 2, NULL)` = **{{E1.truth_with_null}}**, but `5 NOT IN (1, 2)` = **{{E1.truth_without_null}}**. The *NULL semantics* page: "`NOT IN` always returns `UNKNOWN` when the list contains `NULL` and does not contain the input value". `WHERE` keeps only rows where the condition is true, so UNKNOWN rows are dropped.
+# MAGIC * That is why `NOT IN (SELECT patient_id FROM encounters)` returned **{{E1.not_in_rows}}** rows, although 10 patients have no encounter: the subquery contains NULLs.
+# MAGIC * `LEFT ANTI JOIN` returned **{{E1.anti_rows}}** rows (patients {{E1.anti_ids}}), `NOT EXISTS` {{E1.not_exists_rows}}, `NOT IN` with `WHERE patient_id IS NOT NULL` in the subquery {{E1.not_in_fixed_rows}}, and the PySpark `left_anti` join {{E1.anti_py_rows}}.
 # MAGIC
-# MAGIC > **Key takeaway:** `read_files` is the fastest way to look at raw files with SQL. It reads all files on every query and stores nothing.
+# MAGIC > **Key takeaway:** for "has no match", write `LEFT ANTI JOIN` or `NOT EXISTS`. Use `NOT IN` only with a list that can never contain NULL.
 
 # COMMAND ----------
 
 # DBTITLE 1,E2 Predict
 # MAGIC %md
-# MAGIC ### E2 — CSV: `spark.read.csv` without options vs `read_files`
+# MAGIC ### E2 — `LEFT SEMI JOIN` vs `INNER JOIN`, and a `CROSS JOIN` calendar grid
 # MAGIC
 # MAGIC **Predict:**
-# MAGIC 1. `spark.read.csv(path)` with **no options**: what are the column names, and how many rows do you get from a file with a header and 10 data rows?
-# MAGIC 2. `read_files(…, format => 'csv', header => true)`: which type does `npi` get?
-# MAGIC 3. How do you make `npi` a `STRING` without writing the full schema?
+# MAGIC 1. "Patients who had at least one ER visit": does `INNER JOIN` return one row per patient?
+# MAGIC 2. Does `LEFT SEMI JOIN` return the columns of `encounters`?
+# MAGIC 3. 20 providers `CROSS JOIN` 12 months: how many rows?
 
 # COMMAND ----------
 
 # DBTITLE 1,E2 Code
-plain = spark.read.csv(PROVIDERS_DIR)                          # no options at all
-display(plain)                                                 # look at the first row and the column names
-METRICS["E2.plain_columns"] = ", ".join(plain.columns)
-METRICS["E2.plain_rows"] = plain.count()
-METRICS["E2.plain_type_first"] = plain.dtypes[0][1]           # type of the first column
-
-rf_query = f"SELECT * FROM read_files('{PROVIDERS_DIR}', format => 'csv', header => true)"
-rf = spark.sql(rf_query)                                       # header row gives the column names
-display(spark.sql(f"DESCRIBE QUERY {rf_query}"))               # inferred types
-METRICS["E2.rf_rows"] = rf.count()
-METRICS["E2.rf_type_provider_id"] = dict(rf.dtypes)["provider_id"]
-METRICS["E2.rf_type_npi"] = dict(rf.dtypes)["npi"]
-
-hinted = spark.sql(f"""
-    SELECT * FROM read_files('{PROVIDERS_DIR}', format => 'csv', header => true,
-                             schemaHints => 'npi STRING')      -- change one column, infer the rest
+inner = spark.sql(f"""
+    SELECT p.patient_id, p.state                                 -- patient columns
+    FROM {FQ}.patients p
+    JOIN {FQ}.encounters e                                       -- INNER JOIN: one row per matching encounter
+      ON p.patient_id = e.patient_id AND e.encounter_type = 'ER'
 """)
-display(hinted)
-METRICS["E2.hint_type_npi"] = dict(hinted.dtypes)["npi"]
-METRICS["E2.hint_type_provider_id"] = dict(hinted.dtypes)["provider_id"]
-assert METRICS["E2.rf_rows"] == 10
+semi = spark.sql(f"""
+    SELECT *                                                     -- only patient columns come back
+    FROM {FQ}.patients p
+    LEFT SEMI JOIN {FQ}.encounters e                             -- keep a patient once if ANY match exists
+      ON p.patient_id = e.patient_id AND e.encounter_type = 'ER'
+""")
+display(semi.orderBy("patient_id").limit(5))                     # first rows of the semi join
+n_inner, n_semi, n_inner_distinct = inner.count(), semi.count(), inner.distinct().count()
+semi_cols = semi.columns                                         # which columns did SEMI return?
+print(f"INNER {n_inner} rows, INNER + DISTINCT {n_inner_distinct}, LEFT SEMI {n_semi}; semi columns {semi_cols}")
+
+grid = spark.sql(f"""
+    WITH months AS (                                             -- 12 month start dates
+        SELECT explode(sequence(DATE'2025-01-01', DATE'2025-12-01', INTERVAL 1 MONTH)) AS month),
+    visits AS (                                                  -- real encounter counts per provider and month
+        SELECT provider_id, trunc(encounter_date, 'MONTH') AS month, count(*) AS n
+        FROM {FQ}.encounters
+        WHERE provider_id IS NOT NULL
+        GROUP BY ALL)                                            -- GROUP BY provider_id, month
+    SELECT pr.provider_id, m.month, coalesce(v.n, 0) AS encounters   -- 0 instead of NULL for empty months
+    FROM {FQ}.providers pr
+    CROSS JOIN months m                                          -- every provider x every month
+    LEFT JOIN visits v ON v.provider_id = pr.provider_id AND v.month = m.month
+    ORDER BY pr.provider_id, m.month
+""")
+display(grid)                                                    # the full grid
+g = grid.selectExpr("count(*) AS cells", "count_if(encounters = 0) AS empty_cells",
+                    "min(encounters) AS min_n", "max(encounters) AS max_n").first()
+print(g.asDict())
+METRICS["E2.inner_rows"], METRICS["E2.semi_rows"], METRICS["E2.inner_distinct_rows"] = n_inner, n_semi, n_inner_distinct
+METRICS["E2.semi_columns"] = ", ".join(semi_cols)
+METRICS["E2.grid_cells"], METRICS["E2.grid_empty"] = g["cells"], g["empty_cells"]
+METRICS["E2.grid_min"], METRICS["E2.grid_max"] = g["min_n"], g["max_n"]
+assert n_semi == n_inner_distinct and g["cells"] == 240
 
 # COMMAND ----------
 
@@ -478,53 +668,60 @@ assert METRICS["E2.rf_rows"] == 10
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * `spark.read.csv(path)` with no options: columns `{{E2.plain_columns}}` and **{{E2.plain_rows}}** rows. The header line became a normal data row, and the first column has type `{{E2.plain_type_first}}`. The plain CSV reader does not use the header and does not infer types unless you ask for it.
-# MAGIC * `read_files(…, format => 'csv', header => true)`: **{{E2.rf_rows}}** rows, real column names, and inferred types: `provider_id` = `{{E2.rf_type_provider_id}}`, `npi` = `{{E2.rf_type_npi}}`.
-# MAGIC * `schemaHints => 'npi STRING'` changed only that column: `npi` = `{{E2.hint_type_npi}}`, while `provider_id` was still inferred as `{{E2.hint_type_provider_id}}`.
+# MAGIC * `INNER JOIN` returned **{{E2.inner_rows}}** rows: one row per ER encounter, so a patient with three ER visits appears three times.
+# MAGIC * `INNER JOIN` + `DISTINCT` gave {{E2.inner_distinct_rows}} rows, and `LEFT SEMI JOIN` gave **{{E2.semi_rows}}** rows — the same answer without `DISTINCT`.
+# MAGIC * The semi join returned only the columns `{{E2.semi_columns}}`, although the query says `SELECT *`. A semi join is a filter on the left table.
+# MAGIC * `CROSS JOIN` of 20 providers and 12 months gave **{{E2.grid_cells}}** cells. The encounter counts per cell go from {{E2.grid_min}} to {{E2.grid_max}}; {{E2.grid_empty}} cells are empty in this data. With `LEFT JOIN` + `coalesce(v.n, 0)`, an empty month would show `0` instead of being missing — the reason to build the grid first.
 # MAGIC
-# MAGIC > **Key takeaway:** an identifier such as an NPI is a code, not a number: you never add NPIs, and some codes start with 0. Keep such columns as `STRING` with `schemaHints`; you do not need to write the whole schema.
+# MAGIC > **Key takeaway:** "rows that have a match" → `LEFT SEMI JOIN` / `EXISTS`. Use `INNER JOIN` only when you need columns from both sides.
 
 # COMMAND ----------
 
 # DBTITLE 1,E3 Predict
 # MAGIC %md
-# MAGIC ### E3 — `COPY INTO` is idempotent
+# MAGIC ### E3 — NULL keys in joins: `=` vs `<=>`
 # MAGIC
 # MAGIC **Predict:**
-# MAGIC 1. The target table is created with **no columns**. Can `COPY INTO` still load it?
-# MAGIC 2. You run the same `COPY INTO` a second time. How many rows are inserted?
-# MAGIC 3. A new file with 50 claims arrives. How many rows does the third run insert?
+# MAGIC 1. What is `NULL = NULL`? And `NULL <=> NULL`?
+# MAGIC 2. 50 encounters have `diagnosis_code = NULL`, and `diagnosis_codes` has one row with `code = NULL` ("Not coded"). Does an `INNER JOIN … ON e.diagnosis_code = d.code` return those 50 encounters?
+# MAGIC 3. And with `<=>`?
 
 # COMMAND ----------
 
 # DBTITLE 1,E3 Code
-copy_sql = f"""
-    COPY INTO {FQ}.claims_copy
-    FROM '{CLAIMS_DIR}'
-    FILEFORMAT = JSON
-    COPY_OPTIONS ('mergeSchema' = 'true')                      -- the first load creates the columns
-"""
-spark.sql(f"CREATE TABLE {FQ}.claims_copy")                    # schemaless Delta table (no columns)
+ops = spark.sql("SELECT NULL = NULL AS equals, NULL <=> NULL AS null_safe, 'I10' <=> NULL AS one_side_null")
+display(ops)                                                     # three comparisons
+o = ops.first()                                                  # keep the values
 
-r1 = spark.sql(copy_sql)                                       # run 1: all 3 files
-display(r1)                                                    # COPY INTO returns a small result table
-METRICS["E3.result_columns"] = ", ".join(r1.columns)
-METRICS["E3.run1_inserted"] = r1.first()["num_inserted_rows"]
-METRICS["E3.after_run1"] = spark.table(f"{FQ}.claims_copy").count()
-
-r2 = spark.sql(copy_sql)                                       # run 2: same files again
-display(r2)
-METRICS["E3.run2_inserted"] = r2.first()["num_inserted_rows"]
-METRICS["E3.after_run2"] = spark.table(f"{FQ}.claims_copy").count()
-
-land_claims("claims_004.json", first_id=301, n=50)             # a new delivery arrives
-r3 = spark.sql(copy_sql)                                       # run 3: only the new file
-display(r3)
-METRICS["E3.run3_inserted"] = r3.first()["num_inserted_rows"]
-METRICS["E3.after_run3"] = spark.table(f"{FQ}.claims_copy").count()
-METRICS["E3.type_claim_amount"] = dict(spark.table(f"{FQ}.claims_copy").dtypes)["claim_amount"]
-display(spark.sql(f"DESCRIBE HISTORY {FQ}.claims_copy").select("version", "operation", "operationMetrics"))
-assert METRICS["E3.after_run1"] == 300 and METRICS["E3.after_run2"] == 300 and METRICS["E3.after_run3"] == 350
+eq = spark.sql(f"""
+    SELECT e.encounter_id, e.diagnosis_code, d.description
+    FROM {FQ}.encounters e
+    JOIN {FQ}.diagnosis_codes d ON e.diagnosis_code = d.code     -- normal equality
+""")
+ns = spark.sql(f"""
+    SELECT e.encounter_id, e.diagnosis_code, d.description
+    FROM {FQ}.encounters e
+    JOIN {FQ}.diagnosis_codes d ON e.diagnosis_code <=> d.code   -- null-safe equality
+""")
+left = spark.sql(f"""
+    SELECT e.encounter_id, e.diagnosis_code,
+           d.description,                                        -- NULL when there is no match
+           coalesce(d.description, 'Not coded') AS label         -- a common fix instead of <=>
+    FROM {FQ}.encounters e
+    LEFT JOIN {FQ}.diagnosis_codes d ON e.diagnosis_code = d.code
+""")
+display(ns.filter("diagnosis_code IS NULL").limit(5))            # NULL-coded encounters found by <=>
+display(left.filter("diagnosis_code IS NULL").limit(5))          # the same encounters in a LEFT JOIN with =
+e_df, d_df = spark.table(f"{FQ}.encounters"), spark.table(f"{FQ}.diagnosis_codes")
+ns_py = e_df.join(d_df, e_df.diagnosis_code.eqNullSafe(d_df.code))   # PySpark <=>
+n_eq, n_ns, n_ns_py = eq.count(), ns.count(), ns_py.count()
+n_left_no_desc = left.filter("description IS NULL").count()      # LEFT JOIN rows with no description
+print(f"= : {n_eq} rows, <=> : {n_ns} rows (PySpark {n_ns_py}), LEFT JOIN rows without description: {n_left_no_desc}")
+METRICS["E3.null_eq_null"], METRICS["E3.null_safe"] = show_value(o["equals"]), show_value(o["null_safe"])
+METRICS["E3.one_side_null"] = show_value(o["one_side_null"])
+METRICS["E3.eq_rows"], METRICS["E3.nullsafe_rows"], METRICS["E3.nullsafe_py_rows"] = n_eq, n_ns, n_ns_py
+METRICS["E3.left_no_desc"] = n_left_no_desc
+assert n_ns == n_eq + 50 and n_left_no_desc == 50 and n_ns_py == n_ns
 
 # COMMAND ----------
 
@@ -532,67 +729,80 @@ assert METRICS["E3.after_run1"] == 300 and METRICS["E3.after_run2"] == 300 and M
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * `COPY INTO` returns one row with the columns `{{E3.result_columns}}`.
-# MAGIC * Run 1 loaded the table that had **no columns**: `num_inserted_rows` = **{{E3.run1_inserted}}**, table rows = {{E3.after_run1}}. `mergeSchema` let the first load create the columns.
-# MAGIC * Run 2 with the same files: `num_inserted_rows` = **{{E3.run2_inserted}}**, table rows = {{E3.after_run2}}. The files were already loaded, so they were skipped. This is the idempotency from the docs.
-# MAGIC * After a new 50-claim file arrived, run 3 inserted **{{E3.run3_inserted}}** rows (table rows = {{E3.after_run3}}). Only the new file was loaded.
-# MAGIC * `claim_amount` in the table is `{{E3.type_claim_amount}}`: the JSON reader behind `COPY INTO` infers types. Compare with Auto Loader in E4.
+# MAGIC * `NULL = NULL` → **{{E3.null_eq_null}}**, `NULL <=> NULL` → **{{E3.null_safe}}**, `'I10' <=> NULL` → **{{E3.one_side_null}}** (as the *NULL semantics* page says).
+# MAGIC * The join with `=` returned **{{E3.eq_rows}}** rows: the {{setup.enc_null_code}} encounters with a NULL code are gone. The join with `<=>` returned **{{E3.nullsafe_rows}}** rows (PySpark `eqNullSafe`: {{E3.nullsafe_py_rows}}): they matched the "Not coded" row.
+# MAGIC * The `LEFT JOIN` with `=` keeps every encounter, but {{E3.left_no_desc}} rows have no description; `coalesce(d.description, 'Not coded')` labels them without `<=>`.
 # MAGIC
-# MAGIC > **Key takeaway:** `COPY INTO` can run again and again (a nightly job, a retry after an error) without duplicates. `COPY_OPTIONS ('force' = 'true')` switches this off.
+# MAGIC > **Key takeaway:** NULL keys normally should **not** match (an unknown patient is not the same as another unknown patient). Use `<=>` only when NULL is a real value on both sides, like a "Not coded" reference row.
 
 # COMMAND ----------
 
 # DBTITLE 1,E4 Predict
 # MAGIC %md
-# MAGIC ### E4 — Auto Loader basics
+# MAGIC ### E4 — Deduplicate claims with `QUALIFY`, and the logical order of a query
 # MAGIC
 # MAGIC **Predict:**
-# MAGIC 1. The landing folder now has 4 files (350 claims). How many rows does the first Auto Loader run load?
-# MAGIC 2. We do **not** set `cloudFiles.inferColumnTypes`. Which type does `claim_amount` get?
-# MAGIC 3. We run the stream again with no new files, and then once more after a new file with 25 claims. How many rows does each run add?
+# MAGIC 1. `claims` has 1500 rows and 1350 distinct `claim_id`s. How many rows does the dedup return?
+# MAGIC 2. Can you write the window function in `WHERE` instead of `QUALIFY`?
+# MAGIC 3. Can you write `count(*) > 300` in `WHERE`?
 
 # COMMAND ----------
 
 # DBTITLE 1,E4 Code
-BRONZE = f"{FQ}.claims_bronze"
-BRONZE_CKPT = f"{CHECKPOINTS}/claims_bronze"                  # checkpoint AND schema location of this stream
+dedup_sql = f"""
+    SELECT *
+    FROM {FQ}.claims
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY claim_id             -- one group per claim
+                               ORDER BY updated_at DESC) = 1     -- newest version first, keep only it
+"""
+spark.sql(f"CREATE OR REPLACE TABLE {FQ}.claims_clean AS {dedup_sql}")   # E8 and E12 use this table
+clean = spark.table(f"{FQ}.claims_clean")
+display(clean.orderBy("claim_id").limit(5))
 
-def table_count(name):
-    """Row count of a table, or 0 if it does not exist yet."""
-    return spark.table(name).count() if spark.catalog.tableExists(name) else 0
+sub = spark.sql(f"""
+    SELECT * EXCEPT (rn)                                         -- drop the helper column
+    FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY claim_id ORDER BY updated_at DESC) AS rn
+          FROM {FQ}.claims)                                      -- the same without QUALIFY: a subquery
+    WHERE rn = 1
+""")
+not_latest = spark.sql(f"""
+    SELECT count(*) AS n                                         -- kept rows that are NOT the newest version
+    FROM {FQ}.claims_clean c
+    JOIN (SELECT claim_id, max(updated_at) AS newest FROM {FQ}.claims GROUP BY claim_id) m
+      ON c.claim_id = m.claim_id
+    WHERE c.updated_at <> m.newest
+""").first()["n"]
 
-def load_bronze():
-    """Run the bronze Auto Loader stream once (availableNow) and return how many rows it added."""
-    before = table_count(BRONZE)
-    query = (spark.readStream
-        .format("cloudFiles")                                  # Auto Loader source
-        .option("cloudFiles.format", "json")                   # the files are JSON
-        .option("cloudFiles.schemaLocation", BRONZE_CKPT)      # keep the inferred schema here (_schemas)
-        .load(CLAIMS_DIR)                                      # the landing folder
-        .writeStream
-        .option("checkpointLocation", BRONZE_CKPT)             # remember which files were loaded
-        .trigger(availableNow=True)                            # load all new files, then stop
-        .toTable(BRONZE))                                      # start the stream into a managed table
-    query.awaitTermination()                                   # wait until availableNow is done
-    return table_count(BRONZE) - before
+from pyspark.sql import Window, functions as F                  # the PySpark version
+w = Window.partitionBy("claim_id").orderBy(F.col("updated_at").desc())
+dedup_py = spark.table(f"{FQ}.claims").withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn")
 
-METRICS["E4.run1_added"] = load_bronze()                       # first run: every file in the folder
-METRICS["E4.run2_added"] = load_bronze()                       # second run: no new files
-land_claims("claims_005.json", first_id=351, n=25)             # a new delivery
-METRICS["E4.run3_added"] = load_bronze()                       # third run: only the new file
-METRICS["E4.total"] = table_count(BRONZE)
-
-bronze_types = dict(spark.table(BRONZE).dtypes)
-METRICS["E4.columns"] = ", ".join(spark.table(BRONZE).columns)
-METRICS["E4.type_claim_amount"] = bronze_types["claim_amount"]
-METRICS["E4.type_claim_id"] = bronze_types["claim_id"]
-display(spark.table(BRONZE).orderBy("claim_id").limit(5))
-
-state = spark.sql(f"SELECT * FROM cloud_files_state('{BRONZE_CKPT}')")   # which files Auto Loader loaded
-display(state)
-METRICS["E4.state_files"] = state.count()
-METRICS["E4.state_columns"] = ", ".join(state.columns)
-assert METRICS["E4.run1_added"] == 350 and METRICS["E4.run2_added"] == 0 and METRICS["E4.run3_added"] == 25
+try:                                                             # a window function in WHERE
+    spark.sql(f"SELECT * FROM {FQ}.claims WHERE ROW_NUMBER() OVER (PARTITION BY claim_id ORDER BY updated_at DESC) = 1").collect()
+    where_window = "no error"
+except Exception as e:
+    where_window = error_class(e)
+try:                                                             # an aggregate in WHERE
+    spark.sql(f"SELECT payer, count(*) AS n FROM {FQ}.claims WHERE count(*) > 300 GROUP BY payer").collect()
+    where_agg = "no error"
+except Exception as e:
+    where_agg = error_class(e)
+having = spark.sql(f"""
+    SELECT payer, count(*) AS n
+    FROM {FQ}.claims_clean
+    GROUP BY payer
+    HAVING count(*) > 250                                        -- HAVING runs after GROUP BY: aggregates are fine
+    ORDER BY payer
+""")
+display(having)
+n_clean, n_sub, n_py, n_having = clean.count(), sub.count(), dedup_py.count(), having.count()
+print(f"QUALIFY {n_clean}, subquery {n_sub}, PySpark {n_py}; not newest: {not_latest}; "
+      f"window in WHERE: {where_window}; aggregate in WHERE: {where_agg}; HAVING groups: {n_having}")
+METRICS["E4.clean_rows"], METRICS["E4.sub_rows"], METRICS["E4.py_rows"] = n_clean, n_sub, n_py
+METRICS["E4.not_latest"] = not_latest
+METRICS["E4.where_window_error"], METRICS["E4.where_agg_error"] = where_window, where_agg
+METRICS["E4.having_groups"] = n_having
+assert n_clean == 1350 and n_sub == 1350 and n_py == 1350 and not_latest == 0
 
 # COMMAND ----------
 
@@ -600,63 +810,52 @@ assert METRICS["E4.run1_added"] == 350 and METRICS["E4.run2_added"] == 0 and MET
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * Run 1 added **{{E4.run1_added}}** rows: every file that was in the folder (the 3 setup files and the file from E3).
-# MAGIC * Run 2 added **{{E4.run2_added}}** rows: no new files. The checkpoint remembers the loaded files, so nothing is read twice.
-# MAGIC * After a new 25-claim file, run 3 added **{{E4.run3_added}}** rows. Total: {{E4.total}} rows.
-# MAGIC * Types without `cloudFiles.inferColumnTypes`: `claim_amount` = `{{E4.type_claim_amount}}`, `claim_id` = `{{E4.type_claim_id}}`. As the docs say, Auto Loader infers **all columns as strings** for JSON, CSV and XML. `read_files` (E1) and `COPY INTO` (E3) inferred numbers from the same files.
-# MAGIC * Columns: `{{E4.columns}}`. Auto Loader added `_rescued_data` by itself.
-# MAGIC * `cloud_files_state(checkpoint)` listed **{{E4.state_files}}** files, with the columns `{{E4.state_columns}}`. This is the built-in way to see which files a stream has loaded.
+# MAGIC * `QUALIFY ROW_NUMBER() … = 1` kept **{{E4.clean_rows}}** of {{setup.claims}} rows — one per distinct `claim_id` ({{setup.distinct_claims}}). The subquery version gave {{E4.sub_rows}} rows and the PySpark version {{E4.py_rows}}. Kept rows that are **not** the newest version: {{E4.not_latest}}.
+# MAGIC * A window function in `WHERE` failed with `{{E4.where_window_error}}`, and an aggregate in `WHERE` failed with `{{E4.where_agg_error}}`. Both show the logical order from 4.1: `WHERE` runs before `GROUP BY` and before window functions, so it cannot see their results.
+# MAGIC * The same filter in `HAVING` worked: {{E4.having_groups}} payer groups have more than 250 claims.
 # MAGIC
-# MAGIC > **Key takeaway:** the same folder (checkpoint + `cloudFiles.schemaLocation`) is the memory of the stream. If you delete it, the next run loads every file again.
+# MAGIC > **Key takeaway:** dedup = `QUALIFY ROW_NUMBER() OVER (PARTITION BY key ORDER BY version_column DESC) = 1`. This is the standard step before a `MERGE` (a later lesson): a `MERGE` fails when several source rows match the same target row (*MERGE INTO* reference).
 
 # COMMAND ----------
 
 # DBTITLE 1,E5 Predict
 # MAGIC %md
-# MAGIC ### E5 — A new column arrives (`addNewColumns`)
+# MAGIC ### E5 — Days between visits with `LAG` and `LEAD`
 # MAGIC
 # MAGIC **Predict:**
-# MAGIC 1. A file with 20 claims and a new column `payer` lands. What happens when the bronze stream runs?
-# MAGIC 2. We restart the stream exactly as before. Does it load the file now?
-# MAGIC 3. What is inside the `_schemas` folder of the checkpoint?
+# MAGIC 1. What does `LAG(encounter_date)` return on the first visit of each patient?
+# MAGIC 2. Some patients have two visits on the same day. What is the gap for the second one?
+# MAGIC 3. `datediff(prev_date, encounter_date)` — is that right?
 
 # COMMAND ----------
 
 # DBTITLE 1,E5 Code
-INGEST_NB = "./L03 - Bronze Ingestion"                         # companion notebook in the same folder
-
-def run_ingest_notebook(run_name, merge_schema):
-    """Run the bronze ingestion notebook once, like one job run. Return (status, rows added, error classes)."""
-    error_file = f"{VOL}/_errors/{run_name}.json"               # the child writes its error classes here
-    params = {"source_dir": CLAIMS_DIR, "table": BRONZE, "checkpoint": BRONZE_CKPT,
-              "merge_schema": str(merge_schema).lower(), "error_file": error_file}
-    try:
-        result = json.loads(dbutils.notebook.run(INGEST_NB, 600, params))   # 600 s timeout
-        return "SUCCESS", result["rows_added"], ""
-    except Exception:                                           # the child run failed
-        err = json.loads(dbutils.fs.head(error_file))
-        return "FAILED", 0, ", ".join(err["error_classes"])
-
-land_claims("claims_006.json", first_id=376, n=20, extra={"payer": "Medicare"})   # new column payer
-
-for run_name, merge in [("runA", False),                       # A: the stream sees the new column
-                        ("runB", False),                       # B: restart with the same code
-                        ("runC", True)]:                       # C: restart, writer allows new columns
-    status, added, errors = run_ingest_notebook(run_name, merge)
-    METRICS[f"E5.{run_name}_status"] = status
-    METRICS[f"E5.{run_name}_added"] = added
-    METRICS[f"E5.{run_name}_errors"] = errors or "none"
-    print(f"{run_name}: merge_schema={merge} -> {status}, rows added {added}, errors: {errors or 'none'}")
-
-METRICS["E5.total"] = table_count(BRONZE)
-METRICS["E5.columns"] = ", ".join(spark.table(BRONZE).columns)
-METRICS["E5.payer_filled"] = spark.table(BRONZE).filter("payer IS NOT NULL").count()
-display(spark.table(BRONZE).filter("claim_id >= 370").orderBy("claim_id"))
-
-schema_files = sorted(f.name for f in dbutils.fs.ls(f"{BRONZE_CKPT}/_schemas"))
-METRICS["E5.schema_files"] = ", ".join(schema_files)
-print("schema versions:", schema_files)
-print(dbutils.fs.head(f"{BRONZE_CKPT}/_schemas/{schema_files[-1]}", 1000))   # the latest stored schema
+gaps = spark.sql(f"""
+    SELECT patient_id, encounter_id, encounter_date,
+           LAG(encounter_date) OVER w                AS prev_date,        -- previous visit of the same patient
+           datediff(encounter_date, LAG(encounter_date) OVER w) AS days_since_prev,   -- end date first
+           datediff(LAG(encounter_date) OVER w, encounter_date) AS swapped,           -- wrong order on purpose
+           LEAD(encounter_date) OVER w               AS next_date         -- next visit
+    FROM {FQ}.encounters
+    WHERE patient_id IS NOT NULL                                          -- WHERE runs before the window
+    WINDOW w AS (PARTITION BY patient_id ORDER BY encounter_date, encounter_id)   -- named window; encounter_id breaks ties
+""")
+s = gaps.selectExpr("count(*) AS n_rows",
+                    "count_if(prev_date IS NULL) AS first_visits",              # one per patient
+                    "count(DISTINCT patient_id) AS patients",
+                    "count_if(days_since_prev = 0) AS same_day",                # ties on encounter_date
+                    "round(avg(days_since_prev), 2) AS avg_gap",
+                    "max(days_since_prev) AS max_gap",
+                    "count_if(swapped < 0) AS swapped_negative",
+                    "count_if(days_since_prev > 0) AS positive_gaps").first()
+tie_patient = gaps.filter("days_since_prev = 0").agg(F.min("patient_id")).first()[0]   # a patient with a same-day visit
+display(gaps.filter(F.col("patient_id") == tie_patient).orderBy("encounter_date", "encounter_id"))
+print(s.asDict(), "tie patient:", tie_patient)
+METRICS["E5.rows"], METRICS["E5.first_visits"], METRICS["E5.patients"] = s["n_rows"], s["first_visits"], s["patients"]
+METRICS["E5.same_day"], METRICS["E5.avg_gap"], METRICS["E5.max_gap"] = s["same_day"], str(s["avg_gap"]), s["max_gap"]
+METRICS["E5.swapped_negative"], METRICS["E5.positive_gaps"] = s["swapped_negative"], s["positive_gaps"]
+METRICS["E5.tie_patient"] = tie_patient
+assert s["n_rows"] == 1980 and s["first_visits"] == s["patients"] and s["swapped_negative"] == s["positive_gaps"]
 
 # COMMAND ----------
 
@@ -664,71 +863,56 @@ print(dbutils.fs.head(f"{BRONZE_CKPT}/_schemas/{schema_files[-1]}", 1000))   # t
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC | Run | Writer `mergeSchema` | Status | Rows added | Error classes |
-# MAGIC | --- | --- | --- | --- | --- |
-# MAGIC | A | no | {{E5.runA_status}} | {{E5.runA_added}} | `{{E5.runA_errors}}` |
-# MAGIC | B (restart, same code) | no | {{E5.runB_status}} | {{E5.runB_added}} | `{{E5.runB_errors}}` |
-# MAGIC | C (restart) | yes | {{E5.runC_status}} | {{E5.runC_added}} | {{E5.runC_errors}} |
+# MAGIC * {{E5.rows}} visits of {{E5.patients}} patients. `WHERE patient_id IS NOT NULL` removed the 20 visits without a patient **before** the window was computed.
+# MAGIC * `prev_date` is NULL on {{E5.first_visits}} rows — exactly one per patient, the first visit (the default value of `LAG` is NULL, *lag function*).
+# MAGIC * {{E5.same_day}} rows have `days_since_prev = 0`: same-day visits (patient {{E5.tie_patient}} is shown above). `encounter_id` in the `ORDER BY` decides which of the two comes first, so the result is the same every run.
+# MAGIC * Average gap {{E5.avg_gap}} days, longest gap {{E5.max_gap}} days.
+# MAGIC * With the arguments swapped, `datediff` was negative on {{E5.swapped_negative}} rows — exactly the {{E5.positive_gaps}} rows with a positive gap. The order is `datediff(endDate, startDate)`.
 # MAGIC
-# MAGIC * **Run A** stopped as the docs describe: the new column `payer` raised `UNKNOWN_FIELD_EXCEPTION` (wrapped in `STREAM_FAILED`). Before it stopped, Auto Loader saved a new schema version. The `_schemas` folder now holds the files `{{E5.schema_files}}`: version 0 from the first run and version 1 with `payer`.
-# MAGIC * **Run B** shows something the docs page does not say directly: a restart with the same code fails again, now with `DELTA_METADATA_MISMATCH`. The **source** schema has the new column, but the **Delta table** does not, and the writer may not add columns.
-# MAGIC * **Run C** added `.option("mergeSchema", "true")` on the **writer**. Now the table has the columns `{{E5.columns}}`. `payer` is filled for {{E5.payer_filled}} rows (the new file only); older rows have NULL. Total rows: {{E5.total}}.
-# MAGIC
-# MAGIC **Why a separate notebook?** In a test run of this lesson, `try/except` around the failing stream was not enough: the notebook cell still failed with `Some streams terminated before this command could finish!`, and this stopped the whole job (run 771734934782354, see `_authoring/L03.md`). A failed stream fails the cell, even if Python catches the exception. So E5 runs the stream in the companion notebook **`L03 - Bronze Ingestion`** with `dbutils.notebook.run`, like one run of a scheduled job. The caller catches the failed child run and restarts it.
-# MAGIC
-# MAGIC > **Key takeaway:** for `addNewColumns`, plan the restart (a job with retries, or a caller that restarts) **and** set `mergeSchema` on the writer. Otherwise the restart fails too.
+# MAGIC > **Key takeaway:** `LAG`/`LEAD` + `datediff` answer "days since the last visit" and "days until the next visit" without a self-join. The `WINDOW w AS (…)` clause lets you write the window once.
 
 # COMMAND ----------
 
 # DBTITLE 1,E6 Predict
 # MAGIC %md
-# MAGIC ### E6 — Rescued data
+# MAGIC ### E6 — Running total: default frame vs `ROWS` frame, with ties
 # MAGIC
 # MAGIC **Predict:**
-# MAGIC 1. A stream with `cloudFiles.inferColumnTypes = true` has `claim_amount` as `DOUBLE`. A file arrives where 3 claims have `claim_amount = "N/A"`. Does the stream fail? What is in `claim_amount` and `_rescued_data` for those rows?
-# MAGIC 2. A stream with `schemaEvolutionMode = rescue` sees a new column `plan_type`. Does the table get a `plan_type` column?
+# MAGIC 1. `SUM(charge) OVER (PARTITION BY patient_id ORDER BY encounter_date)` — no frame written. Two visits on the same day: do they get different running totals?
+# MAGIC 2. Is the default frame `ROWS` or `RANGE`?
+# MAGIC 3. `SUM(charge) OVER (PARTITION BY patient_id)` without `ORDER BY`: what does it return?
 
 # COMMAND ----------
 
 # DBTITLE 1,E6 Code
-TYPED, TYPED_CKPT = f"{FQ}.claims_typed", f"{CHECKPOINTS}/claims_typed"
-RESCUE, RESCUE_CKPT = f"{FQ}.claims_rescue", f"{CHECKPOINTS}/claims_rescue"
-
-def load_with(table, ckpt, **options):
-    """Run an Auto Loader stream with extra cloudFiles options once; return rows added."""
-    before = table_count(table)
-    reader = (spark.readStream.format("cloudFiles")
-              .option("cloudFiles.format", "json")
-              .option("cloudFiles.schemaLocation", ckpt))
-    for key, value in options.items():
-        reader = reader.option(f"cloudFiles.{key}", value)   # e.g. cloudFiles.inferColumnTypes
-    query = (reader.load(CLAIMS_DIR).writeStream
-             .option("checkpointLocation", ckpt)
-             .trigger(availableNow=True)
-             .toTable(table))
-    query.awaitTermination()
-    return table_count(table) - before
-
-# Part A: typed stream, then a file with bad amounts
-METRICS["E6.typed_run1_added"] = load_with(TYPED, TYPED_CKPT, inferColumnTypes="true")
-METRICS["E6.typed_type_claim_amount"] = dict(spark.table(TYPED).dtypes)["claim_amount"]
-land_claims("claims_007.json", first_id=396, n=10, bad_amount_ids=(396, 397, 398))   # 3 bad values
-METRICS["E6.typed_run2_added"] = load_with(TYPED, TYPED_CKPT, inferColumnTypes="true")
-bad = spark.table(TYPED).filter("claim_id IN (396, 397, 398)").orderBy("claim_id")
-display(bad.select("claim_id", "claim_amount", "_rescued_data"))
-METRICS["E6.bad_amount_null"] = bad.filter("claim_amount IS NULL").count()
-METRICS["E6.bad_rescued"] = bad.filter("_rescued_data IS NOT NULL").count()
-METRICS["E6.rescued_example"] = bad.first()["_rescued_data"]
-
-# Part B: rescue mode, then a file with a new column
-METRICS["E6.rescue_run1_added"] = load_with(RESCUE, RESCUE_CKPT, schemaEvolutionMode="rescue")
-land_claims("claims_008.json", first_id=406, n=10, extra={"plan_type": "HMO"})      # new column plan_type
-METRICS["E6.rescue_run2_added"] = load_with(RESCUE, RESCUE_CKPT, schemaEvolutionMode="rescue")
-rescue_cols = spark.table(RESCUE).columns
-METRICS["E6.rescue_has_plan_type"] = "plan_type" in rescue_cols
-METRICS["E6.rescue_rows_with_rescued"] = spark.table(RESCUE).filter("_rescued_data IS NOT NULL").count()
-METRICS["E6.rescue_example"] = (spark.table(RESCUE).filter("claim_id = 406").first()["_rescued_data"])
-display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_amount", "_rescued_data"))
+rt = spark.sql(f"""
+    SELECT patient_id, encounter_id, encounter_date, charge,
+           SUM(charge) OVER (PARTITION BY patient_id ORDER BY encounter_date) AS rt_default,      -- no frame written
+           SUM(charge) OVER (PARTITION BY patient_id ORDER BY encounter_date
+                             RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rt_range,    -- explicit RANGE
+           SUM(charge) OVER (PARTITION BY patient_id ORDER BY encounter_date, encounter_id
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rt_rows,      -- explicit ROWS + tie-breaker
+           SUM(charge) OVER (PARTITION BY patient_id) AS patient_total,                         -- no ORDER BY at all
+           count(*) OVER (PARTITION BY patient_id, encounter_date) AS same_day_visits           -- > 1 means a tie
+    FROM {FQ}.encounters
+    WHERE patient_id IS NOT NULL
+""")
+display(rt.filter(F.col("patient_id") == tie_patient).orderBy("encounter_date", "encounter_id"))   # the patient from E5
+r = rt.selectExpr("count(*) AS n_rows",
+                  "count_if(same_day_visits > 1) AS tied_rows",
+                  "count_if(rt_default <> rt_rows) AS default_ne_rows",
+                  "count_if(rt_default = rt_range) AS default_eq_range",
+                  "count_if(patient_total = rt_default) AS total_eq_default",
+                  "count(DISTINCT patient_id) AS patients").first()
+w_rows = (Window.partitionBy("patient_id").orderBy("encounter_date", "encounter_id")      # PySpark ROWS frame
+          .rowsBetween(Window.unboundedPreceding, Window.currentRow))
+rt_py = rt.withColumn("rt_py", F.sum("charge").over(w_rows))
+py_diff = rt_py.filter("rt_py <> rt_rows").count()               # PySpark vs SQL ROWS frame
+print(r.asDict(), "PySpark differences:", py_diff)
+METRICS["E6.rows"], METRICS["E6.tied_rows"] = r["n_rows"], r["tied_rows"]
+METRICS["E6.default_ne_rows"], METRICS["E6.default_eq_range"] = r["default_ne_rows"], r["default_eq_range"]
+METRICS["E6.total_eq_default"], METRICS["E6.patients"], METRICS["E6.py_diff"] = r["total_eq_default"], r["patients"], py_diff
+assert r["n_rows"] == 1980 and py_diff == 0
 
 # COMMAND ----------
 
@@ -736,16 +920,357 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC **Part A — type mismatch.** With `cloudFiles.inferColumnTypes = true`, the first run added {{E6.typed_run1_added}} rows and `claim_amount` became `{{E6.typed_type_claim_amount}}`. Then a file with 3 `"N/A"` amounts arrived:
-# MAGIC * The stream did **not** fail. It added {{E6.typed_run2_added}} rows.
-# MAGIC * For the 3 bad claims, `claim_amount` is NULL in {{E6.bad_amount_null}} rows, and `_rescued_data` is filled in {{E6.bad_rescued}} rows.
-# MAGIC * Example `_rescued_data`: `{{E6.rescued_example}}`. It keeps the original value and the source file path, so you can fix the data later.
+# MAGIC * {{E6.tied_rows}} of {{E6.rows}} rows share the patient **and** the date with another row.
+# MAGIC * The running total with **no frame written** (`rt_default`) was different from the `ROWS` running total on **{{E6.default_ne_rows}}** rows: on a same-day pair, the first row already includes the charge of the second.
+# MAGIC * `rt_default` was equal to the explicit `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` on **{{E6.default_eq_range}} of {{E6.rows}}** rows. So, measured on this workspace: with `ORDER BY` and no frame, the frame behaves like `RANGE … CURRENT ROW` (all rows with the same `ORDER BY` value are included). The *Window frame clause* page does not state this default.
+# MAGIC * `SUM(charge) OVER (PARTITION BY patient_id)` (no `ORDER BY`) is the patient total on every row. It is equal to `rt_default` on {{E6.total_eq_default}} rows: the last visit of each of the {{E6.patients}} patients, plus the rows that tie with a last visit.
+# MAGIC * The PySpark window with `rowsBetween(Window.unboundedPreceding, Window.currentRow)` matched the SQL `ROWS` result ({{E6.py_diff}} differences).
 # MAGIC
-# MAGIC **Part B — `schemaEvolutionMode = rescue`.** The first run added {{E6.rescue_run1_added}} rows. A file with the new column `plan_type` arrived, and the second run added {{E6.rescue_run2_added}} rows **without failing**.
-# MAGIC * Does the table have a `plan_type` column? **{{E6.rescue_has_plan_type}}**.
-# MAGIC * Rows with `_rescued_data` filled: {{E6.rescue_rows_with_rescued}}. Example: `{{E6.rescue_example}}`.
+# MAGIC > **Key takeaway:** for a row-by-row running total, write the frame (`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) **and** make the `ORDER BY` unique with a tie-breaker.
+
+# COMMAND ----------
+
+# DBTITLE 1,E7 Predict
+# MAGIC %md
+# MAGIC ### E7 — `ROW_NUMBER` vs `RANK` vs `DENSE_RANK` on ties
 # MAGIC
-# MAGIC > **Key takeaway:** rescued data means "never stop, never lose data". `addNewColumns` (E5) changes the table but stops the stream. `rescue` keeps the table schema stable and never stops for a new column.
+# MAGIC **Predict:** A1C results have one decimal, so many patients share the same value.
+# MAGIC 1. How many rows have `ROW_NUMBER() <= 3`? `RANK() <= 3`? `DENSE_RANK() <= 3`?
+# MAGIC 2. After a tie on rank 1, what is the next `RANK`? The next `DENSE_RANK`?
+
+# COMMAND ----------
+
+# DBTITLE 1,E7 Code
+ranked = spark.sql(f"""
+    SELECT lab_id, patient_id, result_value,
+           ROW_NUMBER() OVER w_tie AS row_number,                -- 1, 2, 3, ... always unique
+           RANK()       OVER w     AS rank,                      -- ties share a rank, then a gap
+           DENSE_RANK() OVER w     AS dense_rank                 -- ties share a rank, no gap
+    FROM {FQ}.lab_results
+    WHERE test_code = 'A1C'
+    WINDOW w     AS (PARTITION BY test_code ORDER BY result_value DESC),
+           w_tie AS (PARTITION BY test_code ORDER BY result_value DESC, lab_id)   -- lab_id makes ROW_NUMBER repeatable
+""")
+display(ranked.orderBy("row_number").limit(15))                  # the top of the list
+k = ranked.selectExpr("count_if(row_number <= 3) AS rn3", "count_if(rank <= 3) AS rk3",
+                      "count_if(dense_rank <= 3) AS dr3", "max(result_value) AS top_value",
+                      "count_if(rank = 1) AS top_ties",
+                      "min_by(rank, CASE WHEN dense_rank = 2 THEN 0 ELSE 1 END) AS rank_of_second_value").first()
+print(k.asDict())
+METRICS["E7.rn3"], METRICS["E7.rk3"], METRICS["E7.dr3"] = k["rn3"], k["rk3"], k["dr3"]
+METRICS["E7.top_value"], METRICS["E7.top_ties"] = k["top_value"], k["top_ties"]
+METRICS["E7.rank_of_second_value"] = k["rank_of_second_value"]
+assert k["rn3"] == 3 and k["rk3"] >= 3 and k["dr3"] >= k["rk3"]
+
+# COMMAND ----------
+
+# DBTITLE 1,E7 Explained
+# MAGIC %md
+# MAGIC **Explained (real output from this run):**
+# MAGIC
+# MAGIC * The highest A1C value is {{E7.top_value}}, and **{{E7.top_ties}}** results share it.
+# MAGIC * `ROW_NUMBER() <= 3` → **{{E7.rn3}}** rows: three of the tied rows; which three depends only on the tie-breaker (`lab_id` here).
+# MAGIC * `RANK() <= 3` → **{{E7.rk3}}** rows: all tied rows get rank 1, and the next value gets rank **{{E7.rank_of_second_value}}** (a gap). So "rank ≤ 3" contains only the tied top rows.
+# MAGIC * `DENSE_RANK() <= 3` → **{{E7.dr3}}** rows: the three highest **distinct** values, with all their ties (no gaps).
+# MAGIC
+# MAGIC > **Key takeaway:** dedup → `ROW_NUMBER`; "top N values including ties" → `DENSE_RANK`; "competition ranking" (1, 1, 3) → `RANK`.
+
+# COMMAND ----------
+
+# DBTITLE 1,E8 Predict
+# MAGIC %md
+# MAGIC ### E8 — Subtotals with `ROLLUP`, `CUBE` and `GROUPING SETS`
+# MAGIC
+# MAGIC **Predict:**
+# MAGIC 1. `GROUP BY ROLLUP (payer, status)`: which extra rows appear?
+# MAGIC 2. Some claims have `payer = NULL` (self-pay). How can you tell a self-pay row from a subtotal row, where `payer` is also NULL?
+# MAGIC 3. Which returns more rows: `ROLLUP` or `CUBE`?
+
+# COMMAND ----------
+
+# DBTITLE 1,E8 Code
+rollup = spark.sql(f"""
+    SELECT payer, status,
+           grouping(payer)  AS g_payer,                          -- 1 = payer is "all payers" in this row
+           grouping(status) AS g_status,                         -- 1 = status is "all statuses"
+           CASE WHEN grouping(payer) = 1 THEN 'ALL PAYERS'
+                ELSE coalesce(payer, 'SELF-PAY') END AS payer_label,   -- a readable label
+           count(*) AS claims,
+           sum(amount) AS total_amount
+    FROM {FQ}.claims_clean
+    GROUP BY ROLLUP (payer, status)                              -- (payer, status), (payer), ()
+    ORDER BY g_payer, payer_label, g_status, status
+""")
+display(rollup)
+cube = spark.sql(f"SELECT payer, status, count(*) AS claims FROM {FQ}.claims_clean GROUP BY CUBE (payer, status)")
+sets = spark.sql(f"SELECT payer, status, count(*) AS claims FROM {FQ}.claims_clean GROUP BY GROUPING SETS ((payer), (status))")
+rollup_py = spark.table(f"{FQ}.claims_clean").rollup("payer", "status").count()   # PySpark rollup
+q = rollup.selectExpr("count(*) AS n_rows",
+                      "count_if(payer IS NULL) AS payer_null_rows",
+                      "count_if(g_payer = 1) AS grand_total_rows",
+                      "count_if(g_payer = 0 AND g_status = 1) AS payer_subtotals",
+                      "count_if(payer IS NULL AND g_payer = 0) AS self_pay_rows",
+                      "max_by(claims, g_payer) AS grand_total_claims").first()
+n_cube, n_sets, n_rollup_py = cube.count(), sets.count(), rollup_py.count()
+print(q.asDict(), f"CUBE {n_cube}, GROUPING SETS {n_sets}, PySpark rollup {n_rollup_py}")
+METRICS["E8.rollup_rows"], METRICS["E8.payer_null_rows"] = q["n_rows"], q["payer_null_rows"]
+METRICS["E8.grand_total_rows"], METRICS["E8.payer_subtotals"] = q["grand_total_rows"], q["payer_subtotals"]
+METRICS["E8.self_pay_rows"], METRICS["E8.grand_total_claims"] = q["self_pay_rows"], q["grand_total_claims"]
+METRICS["E8.cube_rows"], METRICS["E8.sets_rows"], METRICS["E8.rollup_py_rows"] = n_cube, n_sets, n_rollup_py
+assert q["grand_total_rows"] == 1 and q["grand_total_claims"] == 1350 and n_rollup_py == q["n_rows"]
+
+# COMMAND ----------
+
+# DBTITLE 1,E8 Explained
+# MAGIC %md
+# MAGIC **Explained (real output from this run):**
+# MAGIC
+# MAGIC * `ROLLUP (payer, status)` returned **{{E8.rollup_rows}}** rows: the detail rows, **{{E8.payer_subtotals}}** payer subtotals (`g_status = 1`) and **{{E8.grand_total_rows}}** grand total (`g_payer = 1`) with {{E8.grand_total_claims}} claims.
+# MAGIC * `payer IS NULL` is true on **{{E8.payer_null_rows}}** rows: {{E8.self_pay_rows}} of them are real self-pay rows (`g_payer = 0`) and the rest is the grand total. Only `grouping(payer)` tells them apart; the `payer_label` column uses it.
+# MAGIC * `CUBE (payer, status)` returned {{E8.cube_rows}} rows (it adds subtotals per status over all payers). `GROUPING SETS ((payer), (status))` returned {{E8.sets_rows}} rows: only the two subtotal levels, no detail and no grand total. The PySpark `rollup` returned {{E8.rollup_py_rows}} rows, like the SQL `ROLLUP`.
+# MAGIC
+# MAGIC > **Key takeaway:** `ROLLUP` = hierarchy subtotals, `CUBE` = all combinations, `GROUPING SETS` = exactly the groups you list. Always label subtotal rows with `grouping()`, never with `IS NULL`.
+
+# COMMAND ----------
+
+# DBTITLE 1,E9 Predict
+# MAGIC %md
+# MAGIC ### E9 — `PIVOT` and `UNPIVOT`
+# MAGIC
+# MAGIC **Predict:**
+# MAGIC 1. We pivot the average lab value per patient into the columns `a1c, ldl, glu, tsh`. 190 patients have labs. How many rows? What happens if we pivot the **whole** `lab_results` table (with `lab_id` and `result_ts`)?
+# MAGIC 2. Only patients with `patient_id % 5 = 0` have TSH tests. What is in `tsh` for the others?
+# MAGIC 3. `UNPIVOT` back to rows: are the NULL cells kept?
+
+# COMMAND ----------
+
+# DBTITLE 1,E9 Code
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.lab_wide AS
+    SELECT *
+    FROM (SELECT patient_id, test_code, result_value             -- ONLY the columns the pivot needs
+          FROM {FQ}.lab_results
+          WHERE patient_id IS NOT NULL)
+    PIVOT (round(avg(result_value), 2)                           -- the value in each new column
+           FOR test_code IN ('A1C' AS a1c, 'LDL' AS ldl, 'GLU' AS glu, 'TSH' AS tsh))   -- literal values -> columns
+""")
+wide = spark.table(f"{FQ}.lab_wide")
+display(wide.orderBy("patient_id").limit(10))
+
+trap = spark.sql(f"""
+    SELECT *
+    FROM {FQ}.lab_results                                        -- lab_id and result_ts become grouping columns
+    PIVOT (avg(result_value) FOR test_code IN ('A1C' AS a1c, 'LDL' AS ldl, 'GLU' AS glu, 'TSH' AS tsh))
+""")
+long_default = spark.sql(f"""
+    SELECT * FROM {FQ}.lab_wide
+    UNPIVOT (avg_value FOR test_code IN (a1c AS `A1C`, ldl AS `LDL`, glu AS `GLU`, tsh AS `TSH`))   -- EXCLUDE NULLS is the default
+""")
+long_all = spark.sql(f"""
+    SELECT * FROM {FQ}.lab_wide
+    UNPIVOT INCLUDE NULLS (avg_value FOR test_code IN (a1c AS `A1C`, ldl AS `LDL`, glu AS `GLU`, tsh AS `TSH`))
+""")
+display(long_default.orderBy("patient_id", "test_code").limit(8))
+wide_py = (spark.table(f"{FQ}.lab_results").filter("patient_id IS NOT NULL")          # PySpark pivot
+           .groupBy("patient_id").pivot("test_code", ["A1C", "LDL", "GLU", "TSH"]).agg(F.round(F.avg("result_value"), 2)))
+long_py = wide.unpivot("patient_id", ["a1c", "ldl", "glu", "tsh"], "test_code", "avg_value")   # PySpark unpivot
+n_wide, n_trap, n_long, n_long_all = wide.count(), trap.count(), long_default.count(), long_all.count()
+nulls = wide.selectExpr("count_if(a1c IS NULL) + count_if(ldl IS NULL) + count_if(glu IS NULL) + count_if(tsh IS NULL) AS cells",
+                       "count_if(tsh IS NULL) AS tsh").first()                   # empty cells in the wide table
+n_null_cells, n_tsh_null = nulls["cells"], nulls["tsh"]
+n_wide_py, n_long_py = wide_py.count(), long_py.count()
+print(f"wide {n_wide} rows {wide.columns}; trap {n_trap} rows; NULL cells {n_null_cells} (TSH {n_tsh_null}); "
+      f"UNPIVOT {n_long}, INCLUDE NULLS {n_long_all}; PySpark pivot {n_wide_py}, unpivot {n_long_py}")
+METRICS["E9.wide_rows"], METRICS["E9.wide_columns"] = n_wide, ", ".join(wide.columns)
+METRICS["E9.trap_rows"], METRICS["E9.trap_columns"] = n_trap, ", ".join(trap.columns)
+METRICS["E9.tsh_null"], METRICS["E9.long_rows"], METRICS["E9.long_all_rows"] = n_tsh_null, n_long, n_long_all
+METRICS["E9.wide_py_rows"], METRICS["E9.long_py_rows"], METRICS["E9.null_cells"] = n_wide_py, n_long_py, n_null_cells
+assert n_wide == 190 and n_long_all == 4 * n_wide and n_long == n_long_all - n_null_cells
+
+# COMMAND ----------
+
+# DBTITLE 1,E9 Explained
+# MAGIC %md
+# MAGIC **Explained (real output from this run):**
+# MAGIC
+# MAGIC * `lab_wide` has **{{E9.wide_rows}}** rows (one per patient with labs) and the columns `{{E9.wide_columns}}`. The PySpark `pivot` also returned {{E9.wide_py_rows}} rows.
+# MAGIC * The trap: pivoting the **whole** table returned **{{E9.trap_rows}}** rows with the columns `{{E9.trap_columns}}`. `lab_id` and `result_ts` became grouping columns, so every lab is its own group.
+# MAGIC * `lab_wide` has {{E9.null_cells}} empty (NULL) cells: {{E9.tsh_null}} in `tsh` (patients without TSH tests) and the rest because a few patients have no A1C or no LDL result.
+# MAGIC * `UNPIVOT` (default `EXCLUDE NULLS`) returned **{{E9.long_rows}}** rows; `UNPIVOT INCLUDE NULLS` returned **{{E9.long_all_rows}}** rows (4 × {{E9.wide_rows}}). The difference is exactly the {{E9.null_cells}} NULL cells.
+# MAGIC * The PySpark `unpivot` returned {{E9.long_py_rows}} rows: unlike the SQL default, it kept the NULL cells.
+# MAGIC
+# MAGIC > **Key takeaway:** before `PIVOT`, select only the grouping column(s), the pivot column and the value column. After `UNPIVOT`, check whether you need `INCLUDE NULLS`.
+
+# COMMAND ----------
+
+# DBTITLE 1,E10 Predict
+# MAGIC %md
+# MAGIC ### E10 — `collect_list` + `filter`, `transform`, `exists`, `aggregate`
+# MAGIC
+# MAGIC **Predict:**
+# MAGIC 1. Can you compute the average A1C per patient from the array alone, without a second `GROUP BY`?
+# MAGIC 2. `aggregate(a1c_values, 0, (acc, v) -> acc + v)` with `DOUBLE` values: does it work?
+
+# COMMAND ----------
+
+# DBTITLE 1,E10 Code
+hof = spark.sql(f"""
+    WITH a1c AS (
+        SELECT patient_id,
+               array_sort(collect_list(result_value)) AS a1c_values,   -- one array per patient, sorted
+               avg(result_value) AS avg_check                           -- normal average, to compare
+        FROM {FQ}.lab_results
+        WHERE test_code = 'A1C' AND patient_id IS NOT NULL
+        GROUP BY patient_id)
+    SELECT patient_id, a1c_values,
+           filter(a1c_values, v -> v >= 6.5)                             AS diabetic_range,   -- keep some elements
+           transform(a1c_values, v -> CASE WHEN v >= 6.5 THEN 'HIGH' ELSE 'OK' END) AS flags, -- map each element
+           exists(a1c_values, v -> v >= 9.0)                             AS any_very_high,    -- any element matches?
+           aggregate(a1c_values, 0D, (acc, v) -> acc + v,
+                     acc -> acc / size(a1c_values))                      AS avg_from_array,   -- fold + finish
+           avg_check
+    FROM a1c
+""")
+display(hof.orderBy("patient_id").limit(5))
+h = hof.selectExpr("count(*) AS patients",
+                   "count_if(size(diabetic_range) > 0) AS with_diabetic",
+                   "count_if(any_very_high) AS with_very_high",
+                   "sum(size(a1c_values)) AS values_total",
+                   "count_if(abs(avg_from_array - avg_check) > 1e-9) AS avg_mismatch").first()
+try:                                                             # INT start value with DOUBLE elements
+    spark.sql(f"SELECT aggregate(array(5.4D, 7.2D), 0, (acc, v) -> acc + v) AS total").collect()
+    int_start = "no error"
+except Exception as e:
+    int_start = error_class(e)
+print(h.asDict(), "INT start:", int_start)
+METRICS["E10.patients"], METRICS["E10.with_diabetic"] = h["patients"], h["with_diabetic"]
+METRICS["E10.with_very_high"], METRICS["E10.values_total"] = h["with_very_high"], h["values_total"]
+METRICS["E10.avg_mismatch"], METRICS["E10.int_start_error"] = h["avg_mismatch"], int_start
+assert h["avg_mismatch"] == 0
+
+# COMMAND ----------
+
+# DBTITLE 1,E10 Explained
+# MAGIC %md
+# MAGIC **Explained (real output from this run):**
+# MAGIC
+# MAGIC * {{E10.patients}} patients have A1C results ({{E10.values_total}} values in the arrays).
+# MAGIC * `filter(a1c_values, v -> v >= 6.5)`: {{E10.with_diabetic}} patients have at least one value in the diabetic range. `exists(…, v -> v >= 9.0)`: {{E10.with_very_high}} patients have a value of 9.0 or more.
+# MAGIC * `aggregate(a1c_values, 0D, (acc, v) -> acc + v, acc -> acc / size(a1c_values))` gave the same average as `avg()` for every patient ({{E10.avg_mismatch}} differences larger than 1e-9).
+# MAGIC * With an `INT` start value (`0`) and `DOUBLE` elements, `aggregate` failed with `{{E10.int_start_error}}`: the start value fixes the type of the accumulator. Use `0D` or `CAST(0 AS DOUBLE)`.
+# MAGIC
+# MAGIC > **Key takeaway:** `collect_list` + higher-order functions work on many values per row without `explode` and a second `GROUP BY`. Sort the array (`array_sort`) if the order matters.
+
+# COMMAND ----------
+
+# DBTITLE 1,E11 Predict
+# MAGIC %md
+# MAGIC ### E11 — `UNION` vs `UNION ALL`, `INTERSECT`, `EXCEPT`
+# MAGIC
+# MAGIC **Predict:** We stack the `patient_id` column of `encounters` (2000 rows) and `lab_results` (3000 rows).
+# MAGIC 1. How many rows does `UNION ALL` return? And `UNION`?
+# MAGIC 2. Both columns contain NULLs. How many NULL rows are in the `UNION` result?
+# MAGIC 3. Which patients are in `encounters EXCEPT lab_results`?
+
+# COMMAND ----------
+
+# DBTITLE 1,E11 Code
+def ids(op):
+    """patient_id from encounters <op> patient_id from lab_results."""
+    return spark.sql(f"SELECT patient_id FROM {FQ}.encounters {op} SELECT patient_id FROM {FQ}.lab_results")
+
+union_all, union = ids("UNION ALL"), ids("UNION")                # keep duplicates / remove duplicates
+intersect, except_ = ids("INTERSECT"), ids("EXCEPT")             # in both / only in encounters
+display(except_.orderBy("patient_id"))                           # patients with visits but no labs
+n_all, n_union = union_all.count(), union.count()
+n_union_null = union.filter("patient_id IS NULL").count()        # NULLs are "equal" in set operations
+n_intersect, n_except = intersect.count(), except_.count()
+n_intersect_null = intersect.filter("patient_id IS NULL").count()   # NULL is in both inputs
+except_ids = sorted(r["patient_id"] for r in except_.collect() if r["patient_id"] is not None)
+n_union_py = (spark.table(f"{FQ}.encounters").select("patient_id")            # PySpark: union() is UNION ALL
+              .union(spark.table(f"{FQ}.lab_results").select("patient_id")).distinct().count())
+print(f"UNION ALL {n_all}, UNION {n_union} (NULL rows {n_union_null}), INTERSECT {n_intersect}, EXCEPT {n_except} {except_ids}, PySpark {n_union_py}")
+METRICS["E11.union_all_rows"], METRICS["E11.union_rows"], METRICS["E11.union_null_rows"] = n_all, n_union, n_union_null
+METRICS["E11.intersect_rows"], METRICS["E11.except_rows"], METRICS["E11.intersect_null"] = n_intersect, n_except, n_intersect_null
+METRICS["E11.except_ids"] = ", ".join(map(str, except_ids))
+METRICS["E11.union_py_rows"] = n_union_py
+assert n_all == 5000 and n_union == n_union_py and n_union_null == 1
+
+# COMMAND ----------
+
+# DBTITLE 1,E11 Explained
+# MAGIC %md
+# MAGIC **Explained (real output from this run):**
+# MAGIC
+# MAGIC * `UNION ALL` returned **{{E11.union_all_rows}}** rows (2000 + 3000). `UNION` returned **{{E11.union_rows}}** rows: it removes duplicates, because `DISTINCT` is the default (*Set operators*). The PySpark `union()` + `distinct()` gave {{E11.union_py_rows}}.
+# MAGIC * `UNION` kept **{{E11.union_null_rows}}** NULL row: in set operations, NULLs are compared "in a null-safe manner" (*NULL semantics*), so all NULLs collapse into one.
+# MAGIC * `INTERSECT` returned {{E11.intersect_rows}} rows; NULL rows among them: {{E11.intersect_null}} (NULL is in both inputs, and NULLs are equal here).
+# MAGIC * `EXCEPT` returned {{E11.except_rows}} rows: patients {{E11.except_ids}} — the patients with visits but no labs from the setup.
+# MAGIC
+# MAGIC > **Key takeaway:** use `UNION ALL` unless you really need duplicates removed. Removing duplicates costs work, and PySpark `union()` never removes them.
+
+# COMMAND ----------
+
+# DBTITLE 1,E12 Predict
+# MAGIC %md
+# MAGIC ### E12 — `FILTER` vs `CASE`, COUNT variants, and NULL functions
+# MAGIC
+# MAGIC **Predict:**
+# MAGIC 1. Are `count(*) FILTER (WHERE status = 'DENIED')`, `count_if(status = 'DENIED')` and `sum(CASE WHEN status = 'DENIED' THEN 1 ELSE 0 END)` equal?
+# MAGIC 2. "Average paid amount": is `avg(CASE WHEN status = 'PAID' THEN amount ELSE 0 END)` correct?
+# MAGIC 3. Is `count(payer)` equal to `count(*)`?
+
+# COMMAND ----------
+
+# DBTITLE 1,E12 Code
+agg = spark.sql(f"""
+    SELECT count(*)                                              AS all_rows,          -- every row
+           count(payer)                                          AS payer_not_null,    -- skips NULL payer
+           count(DISTINCT payer)                                 AS distinct_payers,   -- NULL is not counted
+           count(DISTINCT patient_id)                            AS distinct_patients,
+           approx_count_distinct(patient_id)                     AS approx_patients,   -- estimate (HyperLogLog)
+           count(*) FILTER (WHERE status = 'DENIED')             AS denied_filter,
+           count_if(status = 'DENIED')                           AS denied_count_if,
+           sum(CASE WHEN status = 'DENIED' THEN 1 ELSE 0 END)    AS denied_case,
+           round(avg(amount) FILTER (WHERE status = 'PAID'), 2)  AS avg_paid_filter,   -- right
+           round(avg(CASE WHEN status = 'PAID' THEN amount END), 2)        AS avg_paid_case_null,  -- right: no ELSE
+           round(avg(CASE WHEN status = 'PAID' THEN amount ELSE 0 END), 2) AS avg_paid_case_zero   -- WRONG: zeros count
+    FROM {FQ}.claims_clean
+""")
+display(agg)
+a = agg.first()
+by_payer = spark.sql(f"""
+    SELECT coalesce(payer, 'SELF-PAY') AS payer_label,           -- replace NULL with a label
+           count(*) AS claims,
+           count_if(status = 'DENIED') AS denied,
+           round(100 * count_if(status = 'DENIED') / count(*), 1) AS denied_pct
+    FROM {FQ}.claims_clean
+    GROUP BY ALL                                                 -- = GROUP BY coalesce(payer, 'SELF-PAY')
+    ORDER BY payer_label
+""")
+display(by_payer)
+self_pay = by_payer.filter("payer_label = 'SELF-PAY'").first()["claims"]
+print(a.asDict(), "self-pay claims:", self_pay)
+METRICS["E12.all_rows"], METRICS["E12.payer_not_null"], METRICS["E12.distinct_payers"] = a["all_rows"], a["payer_not_null"], a["distinct_payers"]
+METRICS["E12.distinct_patients"], METRICS["E12.approx_patients"] = a["distinct_patients"], a["approx_patients"]
+METRICS["E12.denied_filter"], METRICS["E12.denied_count_if"], METRICS["E12.denied_case"] = a["denied_filter"], a["denied_count_if"], a["denied_case"]
+METRICS["E12.avg_paid_filter"], METRICS["E12.avg_paid_case_null"] = str(a["avg_paid_filter"]), str(a["avg_paid_case_null"])
+METRICS["E12.avg_paid_case_zero"], METRICS["E12.self_pay"] = str(a["avg_paid_case_zero"]), self_pay
+assert a["denied_filter"] == a["denied_count_if"] == a["denied_case"]
+assert a["avg_paid_filter"] == a["avg_paid_case_null"] and a["all_rows"] - a["payer_not_null"] == self_pay
+
+# COMMAND ----------
+
+# DBTITLE 1,E12 Explained
+# MAGIC %md
+# MAGIC **Explained (real output from this run):**
+# MAGIC
+# MAGIC * `count(*)` = {{E12.all_rows}}, `count(payer)` = {{E12.payer_not_null}}: the difference is the {{E12.self_pay}} self-pay claims with a NULL payer. `count(DISTINCT payer)` = {{E12.distinct_payers}}: NULL is not counted as a value.
+# MAGIC * `count(DISTINCT patient_id)` = {{E12.distinct_patients}}, `approx_count_distinct(patient_id)` = {{E12.approx_patients}}. The estimate is not exact even on this small table; the docs promise accuracy "within a default value of 5%".
+# MAGIC * Denied claims: `FILTER` {{E12.denied_filter}}, `count_if` {{E12.denied_count_if}}, `sum(CASE … ELSE 0 END)` {{E12.denied_case}} — all equal.
+# MAGIC * Average paid amount: `avg(amount) FILTER (WHERE status = 'PAID')` = {{E12.avg_paid_filter}} and `avg(CASE WHEN … THEN amount END)` = {{E12.avg_paid_case_null}} — equal. With `ELSE 0` the result is {{E12.avg_paid_case_zero}}: every claim that is not paid adds a 0 to the average.
+# MAGIC
+# MAGIC > **Key takeaway:** for counts, `FILTER`, `count_if` and `CASE … ELSE 0` are equivalent. For averages, leave out `ELSE` (or use `FILTER`), so that the other rows are NULL and skipped.
 
 # COMMAND ----------
 
@@ -755,21 +1280,22 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC
 # MAGIC | # | Trap (wrong belief) | Truth |
 # MAGIC | --- | --- | --- |
-# MAGIC | 1 | "Auto Loader infers numbers from JSON by itself." | No: without `cloudFiles.inferColumnTypes` every JSON/CSV/XML column is a string (E4, Auto Loader schema docs). |
-# MAGIC | 2 | "`read_files` and Auto Loader have the same type defaults." | `read_files` has `inferColumnTypes = true` by default; Auto Loader does not (E1 vs E4). |
-# MAGIC | 3 | "A date text in JSON becomes `DATE` automatically." | `read_files` kept `service_date` as a string (E1). Use `schemaHints` or a cast. |
-# MAGIC | 4 | "Running `COPY INTO` again duplicates the rows." | Loaded files are skipped; the second run inserted 0 rows (E3). |
-# MAGIC | 5 | "`COPY INTO` needs a table with columns." | A schemaless `CREATE TABLE t` plus `COPY_OPTIONS ('mergeSchema' = 'true')` works (E3). |
-# MAGIC | 6 | "`'force' = 'true'` only forces a schema update." | `force` turns idempotency off: files load again (*COPY INTO* reference). |
-# MAGIC | 7 | "`addNewColumns` adds a new column without stopping." | The stream stops with `UNKNOWN_FIELD_EXCEPTION`; a restart is needed (E5). |
-# MAGIC | 8 | "After the schema change, a restart with the same code works." | It failed with `DELTA_METADATA_MISMATCH` until the writer had `mergeSchema` (E5). |
-# MAGIC | 9 | "`rescue` mode adds new columns to the table." | No: the table keeps its schema; the new column goes into `_rescued_data` (E6). |
-# MAGIC | 10 | "A wrong type (`"N/A"` in a number column) fails the stream or drops the row." | The value becomes NULL and the original value is saved in `_rescued_data` with the file path (E6). |
-# MAGIC | 11 | "The checkpoint folder alone is enough for schema inference." | Schema inference and evolution need `cloudFiles.schemaLocation` (Auto Loader schema docs). |
-# MAGIC | 12 | "`spark.read.csv(path)` uses the header row." | Not without `header`: you get `_c0, _c1, …` and the header as a data row (E2). |
-# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `_authoring/L03.md`). Restart through a job or a caller notebook. |
-# MAGIC | 14 | "Auto Loader uses file notification mode by default." | The default is directory listing mode (*What is Auto Loader?*). |
-# MAGIC | 15 | "`DESCRIBE HISTORY` of the target lists the loaded files." | Use `cloud_files_state('<checkpoint>')` (E4). |
+# MAGIC | 1 | "`NOT IN (subquery)` and `NOT EXISTS` always give the same result." | One NULL in the subquery and `NOT IN` returns **{{E1.not_in_rows}}** rows; `NOT EXISTS` / `LEFT ANTI` returned {{E1.anti_rows}} (E1, *NULL semantics*). |
+# MAGIC | 2 | "`INNER JOIN` answers 'patients who had an ER visit'." | It returns one row per visit ({{E2.inner_rows}} rows); `LEFT SEMI JOIN` returns each patient once ({{E2.semi_rows}}) (E2). |
+# MAGIC | 3 | "`LEFT SEMI JOIN` gives columns from both tables." | Only left-side columns: `{{E2.semi_columns}}` (E2). |
+# MAGIC | 4 | "A join on `a.code = b.code` matches rows where both codes are NULL." | `NULL = NULL` is `{{E3.null_eq_null}}`; use `<=>` (`{{E3.null_safe}}`) or `eqNullSafe` (E3). |
+# MAGIC | 5 | "You can filter a window function in `WHERE`." | Error `{{E4.where_window_error}}`. Use `QUALIFY` or a subquery (E4). |
+# MAGIC | 6 | "`WHERE count(*) > 300` filters groups." | Error `{{E4.where_agg_error}}`. Groups are filtered with `HAVING` (E4). |
+# MAGIC | 7 | "`RANK() = 1` keeps one row per key." | Ties share rank 1 ({{E7.top_ties}} A1C rows had rank 1 in E7). Use `ROW_NUMBER()` for dedup. |
+# MAGIC | 8 | "`SUM(x) OVER (PARTITION BY p ORDER BY d)` is a row-by-row running total." | With ties in `d`, {{E6.default_ne_rows}} rows differed from the `ROWS` version; the default behaved like `RANGE` on all {{E6.default_eq_range}} rows (E6). |
+# MAGIC | 9 | "`SUM(x) OVER (PARTITION BY p)` without `ORDER BY` is a running total." | It is the partition total on every row (E6). |
+# MAGIC | 10 | "In a `ROLLUP` result, `payer IS NULL` marks the subtotal rows." | Real NULL payers also exist ({{E8.self_pay_rows}} self-pay rows). Use `grouping(payer)` (E8). |
+# MAGIC | 11 | "`PIVOT` groups only by the columns I care about." | Every other input column is a grouping column: pivoting the whole lab table gave {{E9.trap_rows}} rows instead of {{E9.wide_rows}} (E9). |
+# MAGIC | 12 | "`UNPIVOT` keeps NULL cells." | Default is `EXCLUDE NULLS`: {{E9.long_rows}} rows vs {{E9.long_all_rows}} with `INCLUDE NULLS` (E9, *UNPIVOT clause*). |
+# MAGIC | 13 | "`UNION` keeps all rows." | `UNION` is `UNION DISTINCT`: {{E11.union_rows}} rows vs {{E11.union_all_rows}} for `UNION ALL` (E11, *Set operators*). PySpark `union()` is `UNION ALL`. |
+# MAGIC | 14 | "`avg(CASE WHEN status = 'PAID' THEN amount ELSE 0 END)` is the average paid amount." | The zeros are averaged too: {{E12.avg_paid_case_zero}} vs the correct {{E12.avg_paid_filter}} (E12). |
+# MAGIC | 15 | "`count(col)` counts all rows." | It skips NULLs: `count(payer)` = {{E12.payer_not_null}}, `count(*)` = {{E12.all_rows}} (E12). |
+# MAGIC | 16 | "`datediff(start, end)` gives a positive number of days." | The order is `datediff(endDate, startDate)`; the swapped call was negative on {{E5.swapped_negative}} rows (E5, *datediff function*). |
 
 # COMMAND ----------
 
@@ -777,28 +1303,29 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC %md
 # MAGIC ## 7 Syntax Cheat Sheet
 # MAGIC
-# MAGIC | Goal | SQL | PySpark |
+# MAGIC | Goal | SQL | PySpark (`from pyspark.sql import Window, functions as F`) |
 # MAGIC | --- | --- | --- |
-# MAGIC | Look at files | `SELECT * FROM read_files('/Volumes/…', format => 'json')` | `spark.read.format("json").load("/Volumes/…")` |
-# MAGIC | CSV with header + types | `read_files(path, format => 'csv', header => true)` | `spark.read.option("header", "true").option("inferSchema", "true").csv(path)` |
-# MAGIC | Change one type | `schemaHints => 'npi STRING'` | `.option("cloudFiles.schemaHints", "npi STRING")` (Auto Loader) |
-# MAGIC | Source file name | `_metadata.file_name`, `_metadata.file_path` | `.select("*", "_metadata.file_name")` |
-# MAGIC | Idempotent batch load | `COPY INTO t FROM '/Volumes/…' FILEFORMAT = JSON COPY_OPTIONS ('mergeSchema' = 'true')` | `spark.sql("COPY INTO …")` |
-# MAGIC | Incremental load | `CREATE OR REFRESH STREAMING TABLE t AS SELECT * FROM STREAM read_files('…')` (pipelines only) | `spark.readStream.format("cloudFiles").option("cloudFiles.format", "json").option("cloudFiles.schemaLocation", ckpt).load(dir)` |
-# MAGIC | Run once and stop | — | `.writeStream.option("checkpointLocation", ckpt).trigger(availableNow=True).toTable("t")` |
-# MAGIC | Allow new columns in the table | `COPY_OPTIONS ('mergeSchema' = 'true')` | `.writeStream.option("mergeSchema", "true")` |
-# MAGIC | Loaded files of a stream | `SELECT * FROM cloud_files_state('<checkpoint>')` | `spark.sql("SELECT * FROM cloud_files_state('…')")` |
-# MAGIC | Run a notebook with parameters | — | `dbutils.notebook.run("./child", 600, {"key": "value"})` |
-# MAGIC
-# MAGIC ### Auto Loader options — quick reference
-# MAGIC
-# MAGIC | Option | Default | Use |
-# MAGIC | --- | --- | --- |
-# MAGIC | `cloudFiles.format` | — (required) | `json`, `csv`, `parquet`, `avro`, `orc`, `text`, `binaryFile`, `xml` |
-# MAGIC | `cloudFiles.schemaLocation` | — | where `_schemas` is stored; needed for inference and evolution |
-# MAGIC | `cloudFiles.inferColumnTypes` | `false` | infer numbers and booleans instead of strings |
-# MAGIC | `cloudFiles.schemaHints` | — | set the type of some columns |
-# MAGIC | `cloudFiles.schemaEvolutionMode` | `addNewColumns` (no schema given) / `none` (schema given) | `addNewColumns`, `rescue`, `failOnNewColumns`, `none` |
+# MAGIC | Rows with a match (no duplicates) | `a LEFT SEMI JOIN b ON a.k = b.k` | `a.join(b, "k", "left_semi")` |
+# MAGIC | Rows without a match | `a LEFT ANTI JOIN b ON a.k = b.k` / `NOT EXISTS` | `a.join(b, "k", "left_anti")` |
+# MAGIC | Every combination | `a CROSS JOIN b` | `a.crossJoin(b)` |
+# MAGIC | NULL-safe join | `ON a.k <=> b.k` | `a.join(b, a.k.eqNullSafe(b.k))` |
+# MAGIC | Dedup, newest wins | `QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1` | `df.withColumn("rn", F.row_number().over(Window.partitionBy("id").orderBy(F.desc("updated_at")))).filter("rn = 1")` |
+# MAGIC | Previous / next value | `LAG(d) OVER (PARTITION BY p ORDER BY d)`, `LEAD(...)` | `F.lag("d").over(w)`, `F.lead("d").over(w)` |
+# MAGIC | Running total | `SUM(x) OVER (PARTITION BY p ORDER BY d, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | `w.rowsBetween(Window.unboundedPreceding, Window.currentRow)` |
+# MAGIC | Rank with ties | `RANK()`, `DENSE_RANK()` | `F.rank()`, `F.dense_rank()` |
+# MAGIC | Conditional count | `count(*) FILTER (WHERE c)`, `count_if(c)` | `F.count_if(cond)`, `F.count(F.when(cond, 1))` |
+# MAGIC | Distinct estimate | `approx_count_distinct(x)` | `F.approx_count_distinct("x")` |
+# MAGIC | Subtotals | `GROUP BY ROLLUP (a, b)`, `CUBE (a, b)`, `GROUPING SETS ((a), (b))`; `grouping(a)` | `df.rollup("a", "b")`, `df.cube("a", "b")`; `F.grouping("a")` |
+# MAGIC | Group by all non-aggregates | `GROUP BY ALL` | — (list the columns) |
+# MAGIC | Rows → columns | `FROM (SELECT k, cat, v FROM t) PIVOT (avg(v) FOR cat IN ('A' AS a, 'B' AS b))` | `df.groupBy("k").pivot("cat", ["A", "B"]).agg(F.avg("v"))` |
+# MAGIC | Columns → rows | `UNPIVOT [INCLUDE NULLS] (v FOR cat IN (a AS A, b AS B))` | `df.unpivot("k", ["a", "b"], "cat", "v")` |
+# MAGIC | Array per group | `collect_list(x)`, `collect_set(x)`, `array_sort(...)` | `F.collect_list("x")`, `F.array_sort(...)` |
+# MAGIC | Array lambdas | `filter(arr, v -> v > 1)`, `transform(...)`, `exists(...)`, `aggregate(arr, 0D, (acc, v) -> acc + v)` | `F.filter("arr", lambda v: v > 1)`, `F.transform`, `F.exists`, `F.aggregate("arr", F.lit(0.0), lambda a, v: a + v)` |
+# MAGIC | Stack results | `UNION ALL`, `UNION`, `INTERSECT`, `EXCEPT` | `union()` (= ALL), `.distinct()`, `intersect()`, `exceptAll()` / `subtract()` |
+# MAGIC | NULL handling | `coalesce(a, 'X')`, `nvl(a, b)`, `nullif(a, b)` | `F.coalesce("a", F.lit("X"))` |
+# MAGIC | Days between dates | `datediff(end, start)` | `F.datediff("end", "start")` |
+# MAGIC | First day of month | `trunc(d, 'MONTH')` (DATE), `date_trunc('MONTH', ts)` (TIMESTAMP) | `F.trunc("d", "month")`, `F.date_trunc("month", "ts")` |
+# MAGIC | Named query part | `WITH x AS (...) SELECT ...` | assign a DataFrame to a variable |
 
 # COMMAND ----------
 
@@ -808,9 +1335,9 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC
 # MAGIC Answer in your own words. Answers are in section 11.
 # MAGIC
-# MAGIC 1. A colleague deletes the checkpoint folder of an Auto Loader stream "to clean up" and runs the stream again. What happens, and why?
-# MAGIC 2. Your team receives about 200 claim files per month and only writes SQL. Another team receives millions of device files per day. Which loading method do you suggest to each team, and why?
-# MAGIC 3. Explain the difference between `schemaEvolutionMode = addNewColumns` and `rescue` for a bronze table that a dashboard reads every hour.
+# MAGIC 1. A report "patients without any lab result" returned zero rows last night, although new patients were registered. The query uses `NOT IN (SELECT patient_id FROM lab_results)`. What probably changed in the data, and how do you make the query robust?
+# MAGIC 2. You deduplicate a CDC feed of claims before a `MERGE`. Why `ROW_NUMBER()` and not `RANK()`? What must the `ORDER BY` of the window contain so that the result is the same every run?
+# MAGIC 3. A finance analyst says the "running total of charges per patient" sometimes stays the same for two rows and then jumps. Explain why, and give the fix.
 
 # COMMAND ----------
 
@@ -820,120 +1347,146 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC
 # MAGIC Do these yourself, without AI help. Each task has a validation cell that prints ✅ Passed or a hint. Solutions are in section 11.
 # MAGIC
-# MAGIC > The practice uses the files that the examples landed. Run sections 3 and 5 first.
+# MAGIC > The practice uses the setup tables only. Run section 3 first.
 
 # COMMAND ----------
 
 # DBTITLE 1,P1 Task
 # MAGIC %md
-# MAGIC ### P1 — Fill in the blanks (3 blanks): Auto Loader syntax
-# MAGIC Load the provider CSV files from `PROVIDERS_DIR` into `main.dbacademy_l03.p1_providers` with Auto Loader. Replace the three `<FILL_IN>` markers.
+# MAGIC ### P1 — Fill in the blanks (3 blanks): visit number and running charge
+# MAGIC Create `main.dbacademy_l03.p1_visits` with one row per encounter (only rows with a `patient_id`): `visit_no` (1, 2, 3, … per patient in date order, ties broken by `encounter_id`) and `running_charge` (the sum of `charge` of this and all earlier visits of the patient). Replace the three `<FILL_IN>` markers.
 
 # COMMAND ----------
 
 # DBTITLE 1,P1 Code
 # >>> BLANK P1
-p1_query = (spark.readStream
-    .format(<FILL_IN>)                                      # 1: the Auto Loader source
-    .option(<FILL_IN>, "csv")                               # 2: the option that sets the file format
-    .option("header", "true")                               # the CSV files have a header row
-    .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p1")
-    .load(PROVIDERS_DIR)
-    .writeStream
-    .option("checkpointLocation", f"{CHECKPOINTS}/p1")
-    .trigger(<FILL_IN>)                                     # 3: load everything new, then stop
-    .toTable(f"{FQ}.p1_providers"))
-p1_query.awaitTermination()
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p1_visits AS
+    SELECT patient_id, encounter_id, encounter_date, charge,
+           <FILL_IN>() OVER (PARTITION BY patient_id ORDER BY encounter_date, encounter_id) AS visit_no,   -- 1: unique numbers
+           SUM(charge) OVER (<FILL_IN> patient_id                                                          -- 2: one window per patient
+                             ORDER BY encounter_date, encounter_id
+                             <FILL_IN> BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_charge      -- 3: count physical rows
+    FROM {FQ}.encounters
+    WHERE patient_id IS NOT NULL
+""")
 # >>> SOLUTION P1
-p1_query = (spark.readStream
-    .format("cloudFiles")                                   # 1: the Auto Loader source
-    .option("cloudFiles.format", "csv")                     # 2: the option that sets the file format
-    .option("header", "true")                               # the CSV files have a header row
-    .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p1")
-    .load(PROVIDERS_DIR)
-    .writeStream
-    .option("checkpointLocation", f"{CHECKPOINTS}/p1")
-    .trigger(availableNow=True)                             # 3: load everything new, then stop
-    .toTable(f"{FQ}.p1_providers"))
-p1_query.awaitTermination()
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p1_visits AS
+    SELECT patient_id, encounter_id, encounter_date, charge,
+           ROW_NUMBER() OVER (PARTITION BY patient_id ORDER BY encounter_date, encounter_id) AS visit_no,   -- 1: unique numbers
+           SUM(charge) OVER (PARTITION BY patient_id                                                         -- 2: one window per patient
+                             ORDER BY encounter_date, encounter_id
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_charge            -- 3: count physical rows
+    FROM {FQ}.encounters
+    WHERE patient_id IS NOT NULL
+""")
 # <<< END P1
 
 # COMMAND ----------
 
 # DBTITLE 1,P1 Validation
 try:
-    t = spark.table(f"{FQ}.p1_providers")
-    rows, cols = t.count(), t.columns
-    PRACTICE_PASSED["P1"] = rows == 10 and "provider_id" in cols
-    print("✅ Passed" if PRACTICE_PASSED["P1"] else
-          f"Hint: want 10 rows and a provider_id column; got {rows} rows and columns {cols}. "
-          "Did the header option reach the reader?")
+    t = spark.table(f"{FQ}.p1_visits")
+    w_check = Window.partitionBy("patient_id").orderBy("encounter_date", "encounter_id")
+    c = (t.withColumn("prev_rc", F.lag("running_charge").over(w_check))
+          .withColumn("total", F.sum("charge").over(Window.partitionBy("patient_id")))
+          .withColumn("n", F.count("*").over(Window.partitionBy("patient_id")))
+          .selectExpr("count(*) AS n_rows",
+                      "count(DISTINCT patient_id, visit_no) AS distinct_visits",
+                      "count_if(visit_no = n AND running_charge <> total) AS bad_last",
+                      "count_if(running_charge <= prev_rc) AS not_increasing").first())
+    ok = c["n_rows"] == 1980 and c["distinct_visits"] == 1980 and c["bad_last"] == 0 and c["not_increasing"] == 0
+    PRACTICE_PASSED["P1"] = ok
+    print("✅ Passed" if ok else
+          f"Hint: want 1980 rows, 1980 distinct (patient_id, visit_no), last running_charge = patient total, and a running "
+          f"charge that grows on every row; got {c.asDict()}. Ties on the same day need a unique number and a ROWS frame.")
+    METRICS["P1.rows"] = c["n_rows"]
 except Exception as e:
     PRACTICE_PASSED["P1"] = False
-    print("Hint: the table main.dbacademy_l03.p1_providers does not exist yet. Check the three blanks.", error_class(e))
-METRICS["P1.rows"] = spark.table(f"{FQ}.p1_providers").count() if spark.catalog.tableExists(f"{FQ}.p1_providers") else 0
+    print("Hint: the table main.dbacademy_l03.p1_visits does not exist yet. Check the three blanks.", error_class(e))
 
 # COMMAND ----------
 
 # DBTITLE 1,P2 Task
 # MAGIC %md
-# MAGIC ### P2 — Fix the bugs (2 bugs): a nightly COPY INTO job
-# MAGIC The job loads the files `claims_001.json` to `claims_003.json` into `main.dbacademy_l03.p2_claims`. It runs twice in the cell below, like a job that is retried after an error.
-# MAGIC After the two runs the table must have **exactly 300 rows** and the normal claim columns. The code has two bugs. Fix them in place.
+# MAGIC ### P2 — Fix the bugs (2 bugs)
+# MAGIC The cell builds two tables for the care-gap team:
+# MAGIC * `p2_no_labs` — patients who never had a lab result (the setup made exactly **10** of them);
+# MAGIC * `p2_provider_running` — per provider, the running total of `charge` over the year, one **different** value per encounter (ties on the same day broken by `encounter_id`).
+# MAGIC
+# MAGIC Each query has one bug. Fix them in place.
 
 # COMMAND ----------
 
 # DBTITLE 1,P2 Code
-spark.sql(f"DROP TABLE IF EXISTS {FQ}.p2_claims")
-spark.sql(f"CREATE TABLE {FQ}.p2_claims")                     # schemaless target
 # >>> BLANK P2
-p2_sql = f"""
-    COPY INTO {FQ}.p2_claims
-    FROM '{CLAIMS_DIR}'
-    FILEFORMAT = CSV
-    PATTERN = 'claims_00[1-3].json'
-    COPY_OPTIONS ('mergeSchema' = 'true', 'force' = 'true')
-"""
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p2_no_labs AS
+    SELECT patient_id
+    FROM {FQ}.patients
+    WHERE patient_id NOT IN (SELECT patient_id FROM {FQ}.lab_results)
+""")
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p2_provider_running AS
+    SELECT provider_id, encounter_id, encounter_date, charge,
+           SUM(charge) OVER (PARTITION BY provider_id ORDER BY encounter_date) AS running_total
+    FROM {FQ}.encounters
+    WHERE provider_id IS NOT NULL
+""")
 # >>> SOLUTION P2
-p2_sql = f"""
-    COPY INTO {FQ}.p2_claims
-    FROM '{CLAIMS_DIR}'
-    FILEFORMAT = JSON
-    PATTERN = 'claims_00[1-3].json'
-    COPY_OPTIONS ('mergeSchema' = 'true')
-"""
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p2_no_labs AS
+    SELECT p.patient_id
+    FROM {FQ}.patients p
+    LEFT ANTI JOIN {FQ}.lab_results l ON p.patient_id = l.patient_id     -- fix 1: NULL-safe "no match"
+""")
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p2_provider_running AS
+    SELECT provider_id, encounter_id, encounter_date, charge,
+           SUM(charge) OVER (PARTITION BY provider_id ORDER BY encounter_date, encounter_id
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total   -- fix 2: ROWS + tie-breaker
+    FROM {FQ}.encounters
+    WHERE provider_id IS NOT NULL
+""")
 # <<< END P2
-spark.sql(p2_sql)                                              # the nightly run
-spark.sql(p2_sql)                                              # the retry
 
 # COMMAND ----------
 
 # DBTITLE 1,P2 Validation
 try:
-    t = spark.table(f"{FQ}.p2_claims")
-    rows, cols = t.count(), t.columns
-    PRACTICE_PASSED["P2"] = rows == 300 and "claim_amount" in cols
-    if PRACTICE_PASSED["P2"]:
+    no_labs = sorted(r["patient_id"] for r in spark.table(f"{FQ}.p2_no_labs").collect())
+    w_check = Window.partitionBy("provider_id").orderBy("encounter_date", "encounter_id")
+    dup_totals = (spark.table(f"{FQ}.p2_provider_running")
+                  .withColumn("prev_total", F.lag("running_total").over(w_check))
+                  .filter("running_total = prev_total").count())          # equal totals on two rows = tie problem
+    ok_a, ok_b = no_labs == list(range(1, 11)), dup_totals == 0
+    ok = ok_a and ok_b
+    PRACTICE_PASSED["P2"] = ok
+    if ok:
         print("✅ Passed")
-    elif "claim_amount" not in cols:
-        print(f"Hint: the columns are {cols}. Which FILEFORMAT do the claim files have?")
-    else:
-        print(f"Hint: {rows} rows instead of 300. Which copy option makes COPY INTO load the same files again?")
+    if not ok_a:
+        print(f"Hint (p2_no_labs): want patients 1-10, got {len(no_labs)} rows. Does lab_results.patient_id contain NULLs?")
+    if not ok_b:
+        print(f"Hint (p2_provider_running): {dup_totals} rows repeat the running total of the row before. "
+              "Which frame do you get when you write none, and what happens on ties?")
+    METRICS["P2.no_labs"], METRICS["P2.dup_totals"] = len(no_labs), dup_totals
 except Exception as e:
     PRACTICE_PASSED["P2"] = False
     print("Hint: run the P2 code cell first.", error_class(e))
-METRICS["P2.rows"] = spark.table(f"{FQ}.p2_claims").count()
 
 # COMMAND ----------
 
 # DBTITLE 1,P3 Task
 # MAGIC %md
-# MAGIC ### P3 — From scratch (with hints): a typed bronze table
-# MAGIC Load **all** claim files from `CLAIMS_DIR` into `main.dbacademy_l03.p3_claims` with Auto Loader, in one `availableNow` run. Requirements:
-# MAGIC * `claim_amount` must be `DOUBLE` and `service_date` must be `DATE`;
-# MAGIC * the 3 claims with `"N/A"` must not stop the load (their original value must be kept).
+# MAGIC ### P3 — From scratch (with hints): 30-day readmission flag
+# MAGIC Create `main.dbacademy_l03.p3_readmissions` with **one row per `INPATIENT` encounter** that has a `patient_id`, and the columns
+# MAGIC `encounter_id, patient_id, encounter_date, discharge_date, next_admit_date, days_to_next, readmit_30d`:
+# MAGIC * `next_admit_date` — the `encounter_date` of the **next INPATIENT** encounter of the same patient (order by `encounter_date`, then `encounter_id`), or NULL;
+# MAGIC * `days_to_next` — days from `discharge_date` to `next_admit_date`;
+# MAGIC * `readmit_30d` — `true` if `days_to_next <= 30`, otherwise `false` (also `false` when there is no next admission).
 # MAGIC
-# MAGIC **Hints:** checkpoint and schema location `f"{CHECKPOINTS}/p3"` · `cloudFiles.inferColumnTypes` · `cloudFiles.schemaHints` with two columns · the `"N/A"` values go to the rescued data column by themselves.
+# MAGIC **Hints:** filter first, then the window (`WHERE` runs before window functions) · `LEAD` · `datediff(end, start)` · `coalesce(…, false)`.
 
 # COMMAND ----------
 
@@ -941,48 +1494,55 @@ METRICS["P2.rows"] = spark.table(f"{FQ}.p2_claims").count()
 # >>> BLANK P3
 # Your code here
 # >>> SOLUTION P3
-p3_query = (spark.readStream
-    .format("cloudFiles")
-    .option("cloudFiles.format", "json")
-    .option("cloudFiles.inferColumnTypes", "true")                              # numbers instead of strings
-    .option("cloudFiles.schemaHints", "claim_amount DOUBLE, service_date DATE") # fix two types
-    .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p3")
-    .load(CLAIMS_DIR)
-    .writeStream
-    .option("checkpointLocation", f"{CHECKPOINTS}/p3")
-    .trigger(availableNow=True)
-    .toTable(f"{FQ}.p3_claims"))
-p3_query.awaitTermination()
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p3_readmissions AS
+    WITH stays AS (
+        SELECT encounter_id, patient_id, encounter_date, discharge_date,
+               LEAD(encounter_date) OVER (PARTITION BY patient_id
+                                          ORDER BY encounter_date, encounter_id) AS next_admit_date
+        FROM {FQ}.encounters
+        WHERE encounter_type = 'INPATIENT' AND patient_id IS NOT NULL)
+    SELECT *,
+           datediff(next_admit_date, discharge_date) AS days_to_next,
+           coalesce(datediff(next_admit_date, discharge_date) <= 30, false) AS readmit_30d
+    FROM stays
+""")
 # <<< END P3
 
 # COMMAND ----------
 
 # DBTITLE 1,P3 Validation
 try:
-    t = spark.table(f"{FQ}.p3_claims")
-    expected = spark.read.text(CLAIMS_DIR).count()                # one claim per line in all landed files
-    rows, types = t.count(), dict(t.dtypes)
-    null_amounts = t.filter("claim_amount IS NULL").count()
-    PRACTICE_PASSED["P3"] = (rows == expected and types.get("claim_amount") == "double"
-                             and types.get("service_date") == "date" and null_amounts == 3)
-    print("✅ Passed" if PRACTICE_PASSED["P3"] else
-          f"Hint: want {expected} rows, claim_amount double, service_date date, 3 NULL amounts; got {rows} rows, "
-          f"claim_amount {types.get('claim_amount')}, service_date {types.get('service_date')}, {null_amounts} NULL amounts.")
-    METRICS["P3.rows"], METRICS["P3.null_amounts"] = rows, null_amounts
+    t = spark.table(f"{FQ}.p3_readmissions")
+    expected = spark.sql(f"""
+        WITH ip AS (SELECT * FROM {FQ}.encounters WHERE encounter_type = 'INPATIENT' AND patient_id IS NOT NULL),
+        nxt AS (SELECT a.encounter_id, a.discharge_date,
+                       min(struct(b.encounter_date, b.encounter_id)).encounter_date AS next_date
+                FROM ip a LEFT JOIN ip b
+                  ON a.patient_id = b.patient_id
+                 AND struct(b.encounter_date, b.encounter_id) > struct(a.encounter_date, a.encounter_id)
+                GROUP BY a.encounter_id, a.discharge_date)
+        SELECT encounter_id, coalesce(datediff(next_date, discharge_date) <= 30, false) AS readmit_30d FROM nxt""")
+    got = t.select("encounter_id", "readmit_30d")
+    missing, extra = expected.exceptAll(got).count(), got.exceptAll(expected).count()
+    rows, readmits = t.count(), t.filter("readmit_30d").count()
+    ok = missing == 0 and extra == 0 and set(t.columns) >= {"next_admit_date", "days_to_next"}
+    PRACTICE_PASSED["P3"] = ok
+    print("✅ Passed" if ok else
+          f"Hint: want {expected.count()} rows; {missing} expected (encounter_id, readmit_30d) pairs are missing and {extra} are wrong. "
+          "Did you filter INPATIENT before LEAD? Is the flag false (not NULL) when there is no next stay?")
+    METRICS["P3.rows"], METRICS["P3.readmits"] = rows, readmits
 except Exception as e:
     PRACTICE_PASSED["P3"] = False
-    print("Hint: the table main.dbacademy_l03.p3_claims does not exist yet.", error_class(e))
+    print("Hint: the table main.dbacademy_l03.p3_readmissions does not exist yet.", error_class(e))
 
 # COMMAND ----------
 
 # DBTITLE 1,P4 Task
 # MAGIC %md
 # MAGIC ### P4 — BLIND (no hints)
-# MAGIC 1. Load the provider CSV files from `PROVIDERS_DIR` into `main.dbacademy_l03.p4_providers` with Auto Loader, so that **a new column never stops the stream and never changes the table**. Use the folder `f"{CHECKPOINTS}/p4"`. Run it once.
-# MAGIC 2. Write a second file `providers_002.csv` into `PROVIDERS_DIR` with the header `provider_id,provider_name,specialty,npi,network` and 5 rows: provider ids 11 to 15, name `Dr Provider <id>`, specialty `General`, npi `10000000<id>`, network `IN`.
-# MAGIC 3. Run the stream again.
-# MAGIC
-# MAGIC Goal: 15 rows, no `network` column, and the 5 new rows keep `network` in the rescued data column.
+# MAGIC Create `main.dbacademy_l03.p4_latest_labs`: for every patient and test (ignore rows without `patient_id`), the **latest** lab result, with the columns
+# MAGIC `patient_id, test_code, result_ts, result_value, prev_value, change_from_prev`. `prev_value` is the value of the test before the latest one (NULL if there is none) and `change_from_prev = result_value - prev_value`.
 
 # COMMAND ----------
 
@@ -990,42 +1550,39 @@ except Exception as e:
 # >>> BLANK P4
 # Your code here
 # >>> SOLUTION P4
-def load_p4():
-    q = (spark.readStream
-        .format("cloudFiles")
-        .option("cloudFiles.format", "csv")
-        .option("header", "true")
-        .option("cloudFiles.schemaEvolutionMode", "rescue")       # never stop, never change the table
-        .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p4")
-        .load(PROVIDERS_DIR)
-        .writeStream
-        .option("checkpointLocation", f"{CHECKPOINTS}/p4")
-        .trigger(availableNow=True)
-        .toTable(f"{FQ}.p4_providers"))
-    q.awaitTermination()
-
-load_p4()
-p4_lines = ["provider_id,provider_name,specialty,npi,network"]
-p4_lines += [f"{i},Dr Provider {i},General,10000000{i},IN" for i in range(11, 16)]
-dbutils.fs.put(f"{PROVIDERS_DIR}/providers_002.csv", "\n".join(p4_lines) + "\n", overwrite=True)
-load_p4()
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {FQ}.p4_latest_labs AS
+    SELECT patient_id, test_code, result_ts, result_value,
+           LAG(result_value) OVER w AS prev_value,
+           result_value - LAG(result_value) OVER w AS change_from_prev
+    FROM {FQ}.lab_results
+    WHERE patient_id IS NOT NULL
+    WINDOW w AS (PARTITION BY patient_id, test_code ORDER BY result_ts)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY patient_id, test_code ORDER BY result_ts DESC) = 1
+""")
 # <<< END P4
 
 # COMMAND ----------
 
 # DBTITLE 1,P4 Validation
 try:
-    t = spark.table(f"{FQ}.p4_providers")
-    rows, cols = t.count(), t.columns
-    rescued = t.filter("_rescued_data LIKE '%network%'").count() if "_rescued_data" in cols else 0
-    PRACTICE_PASSED["P4"] = rows == 15 and "network" not in cols and rescued == 5
-    print("✅ Passed" if PRACTICE_PASSED["P4"] else
-          f"Hint: want 15 rows, no network column, 5 rows with network in _rescued_data; "
-          f"got {rows} rows, network column = {'network' in cols}, {rescued} rescued rows.")
-    METRICS["P4.rows"], METRICS["P4.rescued"] = rows, rescued
+    t = spark.table(f"{FQ}.p4_latest_labs")
+    expected = spark.sql(f"""
+        SELECT patient_id, test_code, h[0].result_ts AS result_ts, h[0].result_value AS result_value,
+               round(h[0].result_value - get(h, 1).result_value, 4) AS change   -- get() is NULL when there is no element 2
+        FROM (SELECT patient_id, test_code,
+                     sort_array(collect_list(struct(result_ts, result_value)), false) AS h   -- newest first
+              FROM {FQ}.lab_results WHERE patient_id IS NOT NULL GROUP BY patient_id, test_code)""")
+    got = t.selectExpr("patient_id", "test_code", "result_ts", "result_value", "round(change_from_prev, 4) AS change")
+    missing, extra = expected.exceptAll(got).count(), got.exceptAll(expected).count()
+    rows, no_prev = t.count(), t.filter("prev_value IS NULL").count()
+    ok = missing == 0 and extra == 0
+    PRACTICE_PASSED["P4"] = ok
+    print("✅ Passed" if ok else f"Not yet: {missing} expected rows are missing and {extra} rows are wrong (want {expected.count()} rows).")
+    METRICS["P4.rows"], METRICS["P4.no_prev"] = rows, no_prev
 except Exception as e:
     PRACTICE_PASSED["P4"] = False
-    print("Hint: the table main.dbacademy_l03.p4_providers does not exist yet.", error_class(e))
+    print("The table main.dbacademy_l03.p4_latest_labs does not exist yet.", error_class(e))
 
 # COMMAND ----------
 
@@ -1035,29 +1592,29 @@ except Exception as e:
 # MAGIC
 # MAGIC Choose the **one best answer**. Answers and explanations are in section 11.
 # MAGIC
-# MAGIC **Q1.** A hospital loads lab-result JSON files with Auto Loader. The code sets `cloudFiles.format` and `cloudFiles.schemaLocation`, but no schema and no other options. Which type does the numeric column `result_value` get in the bronze table?
-# MAGIC A. `DOUBLE` · B. `STRING` · C. `DECIMAL(10,2)` · D. the type of the value in the first file
+# MAGIC **Q1.** A care-gap query lists patients with no visit: `SELECT patient_id FROM patients WHERE patient_id NOT IN (SELECT patient_id FROM encounters)`. Some walk-in encounters have `patient_id = NULL`. What does the query return?
+# MAGIC A. All patients without a visit · B. No rows · C. An error · D. All patients
 # MAGIC
-# MAGIC **Q2.** A nightly `COPY INTO` job loads claim files into a Delta table. It fails after the load has committed, and the scheduler runs it again on the same files. What happens?
-# MAGIC A. Every row is inserted a second time. · B. The files are skipped and no rows are inserted. · C. The command fails because the files were already loaded. · D. Nothing is skipped unless `'force' = 'true'` is set.
+# MAGIC **Q2.** A claims CDC feed has several versions of each `claim_id` with different `updated_at`. Before a `MERGE`, the engineer needs exactly one row per claim, the newest. Which query is correct?
+# MAGIC A. `… QUALIFY RANK() OVER (PARTITION BY claim_id ORDER BY updated_at) = 1` · B. `… QUALIFY ROW_NUMBER() OVER (PARTITION BY claim_id ORDER BY updated_at DESC) = 1` · C. `… WHERE ROW_NUMBER() OVER (PARTITION BY claim_id ORDER BY updated_at DESC) = 1` · D. `SELECT DISTINCT claim_id, max(updated_at) FROM claims`
 # MAGIC
-# MAGIC **Q3.** A bronze Auto Loader stream (no schema given) writes claims to a Delta table. A new column `payer` appears; the stream stops. The engineer restarts the job with **unchanged** code, and it fails again with `DELTA_METADATA_MISMATCH`. What is the fix?
-# MAGIC A. Set `cloudFiles.schemaEvolutionMode` to `none`. · B. Add `.option("mergeSchema", "true")` to the `writeStream`. · C. Delete the checkpoint folder. · D. Set `cloudFiles.inferColumnTypes` to `true`.
+# MAGIC **Q3.** `SUM(charge) OVER (PARTITION BY patient_id ORDER BY encounter_date)` shows the same running total on two visits of one patient on the same day. Why?
+# MAGIC A. A bug in Delta · B. Without a frame clause, rows with the same `encounter_date` are treated as one group (like `RANGE`), so both get the total up to the end of that day · C. `SUM` skips the second row · D. The window has no `PARTITION BY`
 # MAGIC
-# MAGIC **Q4.** Which statement about `cloudFiles.schemaLocation` is correct?
-# MAGIC A. It stores the list of processed files. · B. It stores the inferred schema and its later versions in a `_schemas` folder. · C. It is needed only for CSV files. · D. It replaces `checkpointLocation`.
+# MAGIC **Q4.** A revenue report uses `GROUP BY ROLLUP (payer, status)`. Self-pay claims have `payer = NULL`. How does the engineer label only the real subtotal rows as "ALL PAYERS"?
+# MAGIC A. `CASE WHEN payer IS NULL THEN 'ALL PAYERS' END` · B. `coalesce(payer, 'ALL PAYERS')` · C. `CASE WHEN grouping(payer) = 1 THEN 'ALL PAYERS' ELSE coalesce(payer, 'SELF-PAY') END` · D. `nullif(payer, 'ALL PAYERS')`
 # MAGIC
-# MAGIC **Q5.** An Auto Loader stream with an inferred `DOUBLE` column `heart_rate` receives a record with `"heart_rate": "N/A"`. What happens?
-# MAGIC A. The stream fails. · B. The record is dropped. · C. `heart_rate` is NULL and the original value is kept in `_rescued_data` with the file path. · D. The whole file is skipped.
+# MAGIC **Q5.** A population-health team needs the patients (all patient columns, one row each) who had at least one ER encounter. Which is best?
+# MAGIC A. `patients INNER JOIN encounters … WHERE encounter_type = 'ER'` · B. `patients LEFT SEMI JOIN encounters ON … AND encounter_type = 'ER'` · C. `patients LEFT JOIN encounters …` · D. `patients CROSS JOIN encounters`
 # MAGIC
-# MAGIC **Q6.** A payer sends millions of small eligibility files per day to cloud storage. The team wants incremental loading with schema evolution. What should they use?
-# MAGIC A. `COPY INTO` · B. Auto Loader · C. a view on `read_files` · D. `CREATE TABLE AS SELECT` every day
+# MAGIC **Q6.** An engineer runs `SELECT * FROM lab_results PIVOT (avg(result_value) FOR test_code IN ('A1C' AS a1c, 'LDL' AS ldl))` and expects one row per patient. The result has about as many rows as the table. Why?
+# MAGIC A. PIVOT does not aggregate · B. `lab_id` and `result_ts` are also grouping columns, because every input column not used in the PIVOT groups the result · C. The IN list must be columns, not literals · D. PIVOT needs `GROUP BY ALL`
 # MAGIC
-# MAGIC **Q7.** An engineer must find out which landing files an Auto Loader stream has already ingested. What is the best tool?
-# MAGIC A. `DESCRIBE HISTORY` on the target table · B. `SELECT * FROM cloud_files_state('<checkpoint>')` · C. `dbutils.fs.ls` on the landing folder · D. `SHOW TABLES`
+# MAGIC **Q7.** A dashboard shows "average paid claim amount" as `avg(CASE WHEN status = 'PAID' THEN amount ELSE 0 END)`. Finance says it is too low. Which expression is correct?
+# MAGIC A. `sum(amount) / count(*)` · B. `avg(amount) FILTER (WHERE status = 'PAID')` · C. `avg(coalesce(amount, 0))` · D. `count_if(status = 'PAID')`
 # MAGIC
-# MAGIC **Q8.** A provider roster CSV has a header row and 10 data rows. An engineer runs `spark.read.csv(path)` with no options. What is the result?
-# MAGIC A. 10 rows with the header names and inferred types · B. 11 rows, columns `_c0, _c1, …`, all strings · C. an error, because the header is missing · D. 10 rows, columns `_c0, _c1, …`, inferred types
+# MAGIC **Q8.** Encounters with a missing diagnosis must join to the reference row `code = NULL` ("Not coded") in `diagnosis_codes`. Which join condition does this?
+# MAGIC A. `ON e.diagnosis_code = d.code` · B. `ON e.diagnosis_code <=> d.code` · C. `ON e.diagnosis_code IN (d.code)` · D. `ON coalesce(e.diagnosis_code, '') = d.code`
 
 # COMMAND ----------
 
@@ -1068,24 +1625,24 @@ except Exception as e:
 # MAGIC > Try the warm-up, practice and questions yourself first.
 # MAGIC
 # MAGIC ### Warm-up
-# MAGIC **W1 — schema evolution on append**
+# MAGIC **W1 — append with a new column (`mergeSchema`)**
 # MAGIC {{solution:W1}}
 # MAGIC
-# MAGIC **W2 — CHECK constraint**
+# MAGIC **W2 — CHECK constraint after cleanup**
 # MAGIC {{solution:W2}}
 # MAGIC
-# MAGIC **W3 — DEEP CLONE**
+# MAGIC **W3 — SHALLOW CLONE**
 # MAGIC {{solution:W3}}
 # MAGIC
 # MAGIC ### Check Your Understanding
-# MAGIC 1. The checkpoint is the memory of the stream: it lists the loaded files (and the schema, if `schemaLocation` points there). Without it, the stream is a new stream. It loads **every** file in the folder again, so the table gets duplicates (E4: run 2 added 0 rows only because the checkpoint existed).
-# MAGIC 2. 200 files per month and SQL only: `COPY INTO`. It is idempotent SQL and fine for "files in the order of thousands". Millions of files per day: Auto Loader, recommended "for files in the order of millions or more" and with better schema inference and evolution (*Ingest data from cloud object storage*).
-# MAGIC 3. `addNewColumns` adds the new column to the table, but the stream stops first and needs a restart with writer `mergeSchema` (E5): the dashboard gets the column, but data is late until the restart. `rescue` never stops and never changes the table: the dashboard always gets fresh data, but the new column is only inside `_rescued_data` until someone changes the schema (E6).
+# MAGIC 1. A row with `patient_id = NULL` probably arrived in `lab_results` (for example a lab result that is not matched to a patient yet). One NULL in the subquery makes `NOT IN` UNKNOWN for every patient, so no row qualifies (E1: {{E1.not_in_rows}} rows instead of {{E1.anti_rows}}). Use `LEFT ANTI JOIN` or `NOT EXISTS`, which ignore NULL keys; or add `WHERE patient_id IS NOT NULL` inside the subquery.
+# MAGIC 2. `RANK()` gives the same rank to ties, so two versions with the same `updated_at` would both survive and the `MERGE` would fail or update twice. `ROW_NUMBER()` always returns exactly one row with 1 per key (E4: {{E4.clean_rows}} rows for {{setup.distinct_claims}} claim ids). The `ORDER BY` must be unique inside the partition — add a tie-breaker such as a sequence number or file offset after `updated_at DESC` — otherwise the winner can change from run to run.
+# MAGIC 3. With `ORDER BY encounter_date` and no frame, rows with the same date are peers: each gets the total up to the end of that day (E6: {{E6.default_ne_rows}} rows differed from the `ROWS` version). Add a unique tie-breaker to `ORDER BY` and write `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
 # MAGIC
 # MAGIC ### P1
 # MAGIC {{solution:P1}}
 # MAGIC
-# MAGIC ### P2 (fixes: `FILEFORMAT = JSON`; no `'force' = 'true'`)
+# MAGIC ### P2 (fixes: `LEFT ANTI JOIN` instead of `NOT IN`; tie-breaker + `ROWS` frame)
 # MAGIC {{solution:P2}}
 # MAGIC
 # MAGIC ### P3
@@ -1094,31 +1651,31 @@ except Exception as e:
 # MAGIC ### P4
 # MAGIC {{solution:P4}}
 # MAGIC
+# MAGIC `LAG` is computed before `QUALIFY` filters the rows (logical order, section 4.1), so the latest row still sees the value before it.
+# MAGIC
 # MAGIC ### Exam answers
 # MAGIC
-# MAGIC **Q1 → B.** Without `cloudFiles.inferColumnTypes`, Auto Loader infers all JSON columns as strings (E4: `claim_amount` = `{{E4.type_claim_amount}}`). A wrong: needs `inferColumnTypes`. C wrong: no decimal inference here. D wrong: there is no "first file decides" rule.
+# MAGIC **Q1 → B.** One NULL in the subquery makes `NOT IN` UNKNOWN (*NULL semantics*); E1 returned {{E1.not_in_rows}} rows. A wrong: that is what `NOT EXISTS` returns ({{E1.not_exists_rows}} rows). C wrong: no error. D wrong: `NOT IN` never returns more rows because of a NULL.
 # MAGIC
-# MAGIC **Q2 → B.** `COPY INTO` skips files it already loaded (E3: second run inserted {{E3.run2_inserted}} rows). A wrong: that is the behaviour with `force`. C wrong: it does not fail. D wrong: skipping is the default; `force` turns it **off**.
+# MAGIC **Q2 → B.** `ROW_NUMBER` + `DESC` keeps exactly the newest row (E4: {{E4.clean_rows}} rows, {{E4.not_latest}} not newest). A wrong: ascending order keeps the oldest, and `RANK` keeps ties. C wrong: error `{{E4.where_window_error}}`. D wrong: even with a `GROUP BY claim_id` it returns only the key and a timestamp, not the claim rows that `MERGE` needs.
 # MAGIC
-# MAGIC **Q3 → B.** The source schema was already updated; the Delta table also needs permission to add the column (E5: run B `{{E5.runB_errors}}`, run C with `mergeSchema` added {{E5.runC_added}} rows). A wrong: `none` ignores new columns, it does not fix the table. C wrong: deleting the checkpoint reloads every file (duplicates). D wrong: types are not the problem.
+# MAGIC **Q3 → B.** E6: the default result was equal to the explicit `RANGE` frame on {{E6.default_eq_range}} of {{E6.rows}} rows and differed from the `ROWS` frame on {{E6.default_ne_rows}} rows. A wrong: expected behaviour. C wrong: both rows are summed. D wrong: the window has `PARTITION BY`.
 # MAGIC
-# MAGIC **Q4 → B.** The schema location holds the `_schemas` folder (E5: files `{{E5.schema_files}}`). A wrong: processed files are tracked in the checkpoint. C wrong: it is for every format without a given schema. D wrong: the writer still needs `checkpointLocation`.
+# MAGIC **Q4 → C.** `grouping(payer)` is 1 only on rows where `payer` was aggregated away (E8: {{E8.grand_total_rows}} grand-total row, {{E8.self_pay_rows}} real self-pay rows). A and B wrong: they also relabel the real self-pay rows. D wrong: `nullif` makes NULLs, it does not label them.
 # MAGIC
-# MAGIC **Q5 → C.** E6: {{E6.bad_amount_null}} NULL values and the original in `_rescued_data`, for example `{{E6.rescued_example}}`. A/B/D wrong: the stream continued and added all {{E6.typed_run2_added}} rows of the file.
+# MAGIC **Q5 → B.** `LEFT SEMI JOIN` returns each patient once with only patient columns (E2: {{E2.semi_rows}} rows). A wrong: one row per ER visit ({{E2.inner_rows}} rows). C wrong: keeps every patient. D wrong: Cartesian product.
 # MAGIC
-# MAGIC **Q6 → B.** Auto Loader for "files in the order of millions or more over time" (*Ingest data from cloud object storage*). A wrong: `COPY INTO` is for thousands of files. C wrong: `read_files` reads all files on every query. D wrong: a full reload every day.
+# MAGIC **Q6 → B.** Every input column that is not in the aggregate or the `FOR` column groups the result (*PIVOT clause*; E9: {{E9.trap_rows}} rows instead of {{E9.wide_rows}}). Select only `patient_id, test_code, result_value` first. A wrong: PIVOT aggregates. C wrong: the IN list must be literals. D wrong: PIVOT groups implicitly.
 # MAGIC
-# MAGIC **Q7 → B.** `cloud_files_state` lists the files of the stream (E4: {{E4.state_files}} files). A wrong: history shows operations, not file names. C wrong: lists the folder, not what was ingested. D wrong: unrelated.
+# MAGIC **Q7 → B.** E12: `FILTER` gave {{E12.avg_paid_filter}}, the `ELSE 0` version {{E12.avg_paid_case_zero}}. A wrong: divides by all claims. C wrong: averages all claims. D wrong: a count, not an average.
 # MAGIC
-# MAGIC **Q8 → B.** E2: {{E2.plain_rows}} rows and columns `{{E2.plain_columns}}`, type `{{E2.plain_type_first}}`. A wrong: needs `header` and type inference. C wrong: no error. D wrong: no type inference without `inferSchema`.
+# MAGIC **Q8 → B.** `<=>` is true when both sides are NULL (*NULL semantics*; E3: {{E3.nullsafe_rows}} rows vs {{E3.eq_rows}} with `=`). A wrong: `NULL = NULL` is `{{E3.null_eq_null}}`. C wrong: `IN` uses `=`. D wrong: `''` does not equal the NULL code either.
 
 # COMMAND ----------
 
 # DBTITLE 1,12 — Cleanup
-for q in spark.streams.active:                          # stop any stream that is still running
-    q.stop()
-spark.sql(f"DROP SCHEMA IF EXISTS {FQ} CASCADE")        # drops tables, the volume and all its files
-print(f"Dropped {FQ} (tables, volume, files, checkpoints).")
+spark.sql(f"DROP SCHEMA IF EXISTS {FQ} CASCADE")        # drops all tables and the volume
+print(f"Dropped {FQ}.")
 
 # COMMAND ----------
 
@@ -1128,23 +1685,29 @@ print(f"Dropped {FQ} (tables, volume, files, checkpoints).")
 # MAGIC
 # MAGIC | Example | Key result |
 # MAGIC | --- | --- |
-# MAGIC | Setup | {{setup.claim_files}} JSON files, {{setup.claim_rows}} claims ({{setup.approved}} APPROVED), {{setup.provider_rows}} providers |
-# MAGIC | E1 `read_files` JSON | {{E1.rows}} rows from {{E1.files}} files; `claim_amount` {{E1.type_claim_amount}}, `service_date` {{E1.type_service_date}}; `_rescued_data` added |
-# MAGIC | E2 CSV | plain reader: {{E2.plain_rows}} rows, `{{E2.plain_columns}}`; `read_files` + header: {{E2.rf_rows}} rows, `npi` {{E2.rf_type_npi}} → with `schemaHints` {{E2.hint_type_npi}} |
-# MAGIC | E3 `COPY INTO` | inserted {{E3.run1_inserted}} → {{E3.run2_inserted}} (rerun) → {{E3.run3_inserted}} (new file); table {{E3.after_run3}} rows |
-# MAGIC | E4 Auto Loader | added {{E4.run1_added}} → {{E4.run2_added}} → {{E4.run3_added}}; all columns strings (`claim_amount` {{E4.type_claim_amount}}); `cloud_files_state` {{E4.state_files}} files |
-# MAGIC | E5 new column | A {{E5.runA_status}} (`{{E5.runA_errors}}`), B {{E5.runB_status}} (`{{E5.runB_errors}}`), C {{E5.runC_status}} (+{{E5.runC_added}}); `_schemas` files {{E5.schema_files}} |
-# MAGIC | E6 rescued data | {{E6.bad_amount_null}} NULL amounts with `_rescued_data`; rescue mode: `plan_type` column = {{E6.rescue_has_plan_type}}, {{E6.rescue_rows_with_rescued}} rescued rows |
-# MAGIC | Practice | P1 {{P1.rows}} rows · P2 {{P2.rows}} rows · P3 {{P3.rows}} rows, {{P3.null_amounts}} NULL amounts · P4 {{P4.rows}} rows, {{P4.rescued}} rescued |
+# MAGIC | Setup | {{setup.patients}} patients, {{setup.providers}} providers, {{setup.encounters}} encounters, {{setup.claims}} claim rows ({{setup.distinct_claims}} claims), {{setup.labs}} labs, {{setup.codes}} codes |
+# MAGIC | E1 no-match | `NOT IN` + NULL {{E1.not_in_rows}} rows · `LEFT ANTI` {{E1.anti_rows}} · `NOT EXISTS` {{E1.not_exists_rows}} |
+# MAGIC | E2 semi / cross | `INNER` {{E2.inner_rows}} rows · `LEFT SEMI` {{E2.semi_rows}} · grid {{E2.grid_cells}} cells |
+# MAGIC | E3 NULL keys | `=` {{E3.eq_rows}} rows · `<=>` {{E3.nullsafe_rows}} rows · `NULL = NULL` → {{E3.null_eq_null}} |
+# MAGIC | E4 dedup | `QUALIFY` {{E4.clean_rows}} rows · window in `WHERE` `{{E4.where_window_error}}` · aggregate in `WHERE` `{{E4.where_agg_error}}` |
+# MAGIC | E5 `LAG` | {{E5.first_visits}} first visits · {{E5.same_day}} same-day gaps · average gap {{E5.avg_gap}} days |
+# MAGIC | E6 frames | default ≠ `ROWS` on {{E6.default_ne_rows}} rows · default = `RANGE` on {{E6.default_eq_range}}/{{E6.rows}} rows |
+# MAGIC | E7 ranking | ≤ 3: `ROW_NUMBER` {{E7.rn3}} · `RANK` {{E7.rk3}} · `DENSE_RANK` {{E7.dr3}} |
+# MAGIC | E8 subtotals | `ROLLUP` {{E8.rollup_rows}} · `CUBE` {{E8.cube_rows}} · `GROUPING SETS` {{E8.sets_rows}} rows; `payer IS NULL` on {{E8.payer_null_rows}} rows, only {{E8.grand_total_rows}} is a grand total |
+# MAGIC | E9 pivot | wide {{E9.wide_rows}} rows (trap: {{E9.trap_rows}}) · `UNPIVOT` {{E9.long_rows}} / `INCLUDE NULLS` {{E9.long_all_rows}} |
+# MAGIC | E10 arrays | {{E10.with_diabetic}} of {{E10.patients}} patients with an A1C ≥ 6.5 · `INT` start → `{{E10.int_start_error}}` |
+# MAGIC | E11 set ops | `UNION ALL` {{E11.union_all_rows}} · `UNION` {{E11.union_rows}} · `EXCEPT` {{E11.except_rows}} |
+# MAGIC | E12 FILTER / CASE | avg paid {{E12.avg_paid_filter}} vs `ELSE 0` {{E12.avg_paid_case_zero}} · exact distinct {{E12.distinct_patients}} vs approx {{E12.approx_patients}} |
+# MAGIC | Practice | P1 {{P1.rows}} rows · P2 {{P2.no_labs}} patients without labs · P3 {{P3.readmits}} readmissions in {{P3.rows}} stays · P4 {{P4.rows}} latest labs ({{P4.no_prev}} without a previous value) |
 # MAGIC
 # MAGIC ### NOT VERIFIED — concept only
-# MAGIC * **File notification / file events mode** — needs a cloud storage location with file events; this workspace has only volumes.
-# MAGIC * **Sources `s3://`, `abfss://`, `gs://`, `wasbs://`** — no storage credential or external location of our own (checked with the CLI: only the Databricks-managed location exists).
-# MAGIC * **`STREAM read_files` streaming tables in Lakeflow Declarative Pipelines** — covered in a later lesson.
-# MAGIC * **`addNewColumnsWithTypeWidening` and `failOnNewColumns`** — described from the docs only.
+# MAGIC * **The logical order of query clauses (4.1)** — standard SQL; the Databricks *SELECT* and *Query* reference pages list the clauses but do not state the order. This notebook only shows its effects (E4 errors, E5 `WHERE` before the window, P4 `LAG` before `QUALIFY`).
+# MAGIC * **`RIGHT`, `FULL OUTER`, `NATURAL` and `LATERAL` joins, `NTILE`, `PERCENT_RANK`, `CUME_DIST`, `FIRST_VALUE`, `LAST_VALUE`, `collect_set`, `forall`** — described from the *JOIN* and *Window functions* reference pages; no example runs them.
+# MAGIC * **The 5% accuracy of `approx_count_distinct`** — from the docs; E12 shows one estimate, not the error bound.
 # MAGIC
 # MAGIC ### Surprises compared with the first expectation
-# MAGIC 1. `read_files` infers numbers, but kept `service_date` as `{{E1.type_service_date}}`, not `DATE` (E1).
-# MAGIC 2. The docs say a restart continues with the new schema. That is true for the **source**: the restart with unchanged code still failed with `{{E5.runB_errors}}`, because the Delta **writer** needs `mergeSchema` (E5).
-# MAGIC 3. A failing stream fails the notebook cell even inside `try/except` (`Some streams terminated before this command could finish!`, test run 771734934782354). This is why E5 uses a companion notebook.
-# MAGIC 4. `read_files` inferred the 10-digit NPI as `{{E2.rf_type_npi}}`: it fits, but an identifier should be a string (E2).
+# MAGIC 1. `approx_count_distinct` was not exact even for {{E12.distinct_patients}} distinct patients: it returned {{E12.approx_patients}} (E12).
+# MAGIC 2. The *Window frame clause* page does not state the default frame. The run showed that `ORDER BY` without a frame behaved like `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` on all {{E6.rows}} rows (E6).
+# MAGIC 3. The first version of E9 expected NULLs only in `tsh`. The real data also had patients without an A1C or LDL result, so `UNPIVOT` dropped {{E9.null_cells}} cells, not {{E9.tsh_null}}.
+# MAGIC 4. `aggregate` does not widen an `INT` start value to `DOUBLE`; it fails with `{{E10.int_start_error}}` (E10).
+# MAGIC 5. The PySpark `unpivot` kept the NULL cells ({{E9.long_py_rows}} rows), while SQL `UNPIVOT` drops them by default (E9).

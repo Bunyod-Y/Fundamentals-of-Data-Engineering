@@ -1,25 +1,30 @@
 """Build a lesson notebook from _authoring/LNN.py (Databricks source format).
 
-    python _authoring/build_notebook.py L02 --mode solved    -> _authoring/build/L02_solved.py
-    python _authoring/build_notebook.py L02 --mode learner   -> Databricks - Learning/L02 - <title>.py
+    python _authoring/build_notebook.py L03 --mode solved    -> _authoring/build/L03_solved.py (+ test harness)
+    python _authoring/build_notebook.py L03 --mode learner   -> Databricks - Learning/L03 - <title>.ipynb
 
 Source conventions (_authoring/LNN.py):
   line 1   # Databricks notebook source
   line 2   # LESSON_TITLE: <title>              (removed from the output)
-  cells    separated by "# COMMAND ----------"; markdown cells use "# MAGIC %md"
+  cells    separated by "# COMMAND ----------"; first line "# DBTITLE 1,<title>"; markdown cells use "# MAGIC %md"
   blocks   # >>> BLANK P1 / # >>> SOLUTION P1 / # <<< END P1   (ids: W1.. warm-up, P1.. practice)
   {{key}}            in markdown: replaced by METRICS[key] from _authoring/LNN.json (learner mode)
   {{solution:P1}}    alone on a markdown line: replaced by the SOLUTION P1 code (both modes)
+  # EXPECT_FAILURE: <key>
+           first code line of a cell that must fail (for example a stream that stops). Learner: a note to
+           read the error and go on. Solved: the cell runs in the harness notebook, and
+           METRICS["<key>.errors"] gets the real error classes (the build fails if the cell does not fail).
 
-Companion notebooks (_authoring/LNN.<name>.py, same two header lines) are notebooks that the lesson
-calls with dbutils.notebook.run("./<title>"). They are copied as they are (no blocks, no placeholders)
-to _authoring/build/LNN.<name>.py and Databricks - Learning/<title>.py, next to the lesson notebook.
+One lesson is one learner notebook: an .ipynb like the hand-written lessons, without test plumbing. Lines
+that start with METRICS[, WARMUP_PASSED[ or PRACTICE_PASSED[ are removed from it, so they may only record
+values: one line, and no work (streams, writes, file landing) on the right side.
 """
 import argparse
 import hashlib
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,14 +38,28 @@ TITLE_RE = re.compile(r"^# LESSON_TITLE:\s*(.+?)\s*$")
 BLOCK_RE = re.compile(r"^\s*# (>>> BLANK|>>> SOLUTION|<<< END) ([A-Z]\d+)\s*$")
 SOLUTION_LINE_RE = re.compile(r"^# MAGIC\s*\{\{solution:([A-Z]\d+)\}\}\s*$")
 PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
+EXPECT_RE = re.compile(r"^# EXPECT_FAILURE: (\S+)\s*$")
+RECORD_RE = re.compile(r"^\s*(?:(?:METRICS|WARMUP_PASSED|PRACTICE_PASSED)\[[^\]]*\]\s*,\s*)*"
+                       r"(?:METRICS|WARMUP_PASSED|PRACTICE_PASSED)\[[^\]]*\]\s*=(?!=)(.*)$")
+TEST_LINE_RE = re.compile(r"^\s*(METRICS|WARMUP_PASSED|PRACTICE_PASSED)\[")
+UNSAFE_RHS_RE = re.compile(r"\b(?:load|land|run)_\w*\(|spark\.sql\(|\.write|toTable|awaitTermination|dbutils\.")
 STANDARD_IDS = ["W1", "W2", "W3", "P1", "P2", "P3", "P4"]
+HARNESS_NAME = "_expect_failure_harness"
 
-STATE_CELL = """# DBTITLE 1,Lesson state (do not edit)
-# METRICS holds the key numbers that the Explained cells quote.
-# The validation cells record here which warm-up and practice tasks passed.
-METRICS = {}
-WARMUP_PASSED = {}
-PRACTICE_PASSED = {}"""
+STATE_CELL = """# DBTITLE 1,Test state (solved build only)
+import json
+METRICS = {{}}
+WARMUP_PASSED = {{}}
+PRACTICE_PASSED = {{}}
+
+def run_expecting_failure(key, code):
+    \"\"\"Run code that must fail in the harness notebook; return its error classes ("none" if it did not fail).\"\"\"
+    error_file = VOL + "/_expect_failure/" + key + ".json"   # VOL is defined by the lesson setup
+    try:
+        dbutils.notebook.run("./{harness}", 900, {{"code": code, "error_file": error_file}})
+    except Exception:
+        pass                                   # the harness run fails when the code fails
+    return ", ".join(json.loads(dbutils.fs.head(error_file))["error_classes"]) or "none\""""
 
 CHECK_CELL = """# DBTITLE 1,Build check — every warm-up and practice validation passed
 expected = {{"WARMUP_PASSED": {warmup}, "PRACTICE_PASSED": {practice}}}
@@ -53,6 +72,22 @@ EXIT_CELL = """# DBTITLE 1,Build check — return METRICS to the runner
 import json
 dbutils.notebook.exit(json.dumps(METRICS, default=str))"""
 
+# A failed stream fails the notebook cell even inside try/except, so expected failures run in this child
+HARNESS = r'''# Databricks notebook source
+# DBTITLE 1,Run code that is expected to fail (test builds only)
+import json, re
+dbutils.widgets.text("code", "")
+dbutils.widgets.text("error_file", "")
+error_file = dbutils.widgets.get("error_file")
+try:
+    exec(dbutils.widgets.get("code"), {"spark": spark, "dbutils": dbutils, "display": display})
+except Exception as e:
+    classes = list(dict.fromkeys(re.findall(r"\[([A-Z][A-Z0-9_]+(?:\.[A-Z0-9_]+)*)\]", str(e))))
+    dbutils.fs.put(error_file, json.dumps({"error_classes": classes or [type(e).__name__]}), overwrite=True)
+    raise
+dbutils.fs.put(error_file, json.dumps({"error_classes": []}), overwrite=True)
+'''
+
 
 class BuildError(Exception):
     pass
@@ -62,10 +97,6 @@ def read_source(lesson):
     path = LESSONS / f"{lesson}.py"
     if not path.exists():
         raise BuildError(f"{path} does not exist")
-    return read_source_file(path)
-
-
-def read_source_file(path):
     lines = path.read_text(encoding="utf-8").replace("\r\n", "\n").split("\n")
     if lines[0] != HEADER:
         raise BuildError(f"{path}: line 1 must be '{HEADER}'")
@@ -114,8 +145,16 @@ def split_cells(text):
     return [c for c in cells if c.strip()]
 
 
+def split_title(cell):
+    """(title, other lines) of a source cell."""
+    lines = cell.split("\n")
+    if lines[0].startswith("# DBTITLE 1,"):
+        return lines[0][len("# DBTITLE 1,"):], lines[1:]
+    return "", lines
+
+
 def is_markdown(cell):
-    lines = [l for l in cell.split("\n") if not l.startswith("# DBTITLE")]
+    _, lines = split_title(cell)
     return bool(lines) and lines[0].startswith("# MAGIC %md")
 
 
@@ -141,6 +180,55 @@ def expand_solutions(cell, solutions):
     return "\n".join(out)
 
 
+def apply_expect_failure(cell, mode):
+    title, lines = split_title(cell)
+    marker = next((m for m in map(EXPECT_RE.match, lines) if m), None)
+    if not marker:
+        return cell
+    key = marker.group(1)
+    body = [l for l in lines if not EXPECT_RE.match(l)]
+    head = [f"# DBTITLE 1,{title}"] if title else []
+    if mode == "learner":
+        return "\n".join(head + ["# Expected to fail: read the error class in the message, then run the next cell."] + body)
+    code = "\n".join(body)
+    return "\n".join(head + [
+        f'METRICS["{key}.errors"] = run_expecting_failure("{key}", {code!r})',
+        f'print("{key} failed with:", METRICS["{key}.errors"])',
+        f'assert METRICS["{key}.errors"] != "none", "{key} was expected to fail, but it did not"'])
+
+
+def strip_test_lines(cell, index):
+    """Learner mode: remove the lines that only record METRICS / *_PASSED values."""
+    out = []
+    for line in cell.split("\n"):
+        if not TEST_LINE_RE.match(line):
+            out.append(line)
+            continue
+        m = RECORD_RE.match(line)
+        if not m:
+            raise BuildError(f"cell {index}: '{line.strip()}' uses a test value; only one-line records are allowed")
+        rhs = m.group(1)
+        if any(rhs.count(a) != rhs.count(b) for a, b in ("()", "[]", "{}")):
+            raise BuildError(f"cell {index}: '{line.strip()}' continues on the next line; keep records on one line")
+        bad = UNSAFE_RHS_RE.findall(rhs)
+        if bad:
+            raise BuildError(f"cell {index}: '{line.strip()}' does work on the right side ({bad}); "
+                             "store the result in a variable first, then record the variable")
+    return "\n".join(out)
+
+
+def check_compiles(cell, index):
+    """Learner code cells must still be valid Python after the test lines are removed."""
+    _, lines = split_title(cell)
+    code = "\n".join(lines)
+    if "<FILL_IN>" in code or code.lstrip().startswith("%"):
+        return
+    try:
+        compile(code, f"cell {index}", "exec")
+    except SyntaxError as e:
+        raise BuildError(f"cell {index} is not valid Python in the learner notebook: {e}") from None
+
+
 def format_value(v):
     return json.dumps(v) if isinstance(v, (dict, list)) else str(v)
 
@@ -162,10 +250,39 @@ def fill_placeholders(cells, metrics, source):
     return out
 
 
+def to_ipynb(cells, lesson, title):
+    """Jupyter notebook in the same shape as the Databricks export of the hand-written lessons."""
+    nb_cells = []
+    for i, cell in enumerate(cells):
+        cell_title, lines = split_title(cell)
+        markdown = bool(lines) and lines[0].startswith("# MAGIC %md")
+        if markdown:
+            lines = [l[len("# MAGIC "):] if l.startswith("# MAGIC ") else "" for l in lines[1:]]
+        source = [l + "\n" for l in lines]
+        if source:
+            source[-1] = source[-1][:-1]
+        meta = {"application/vnd.databricks.v1+cell": {
+            "cellMetadata": {}, "inputWidgets": {},
+            "nuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{lesson}/{i}")),    # stable across builds
+            "showTitle": bool(cell_title), "tableResultSettingsMap": {}, "title": cell_title}}
+        if markdown:
+            nb_cells.append({"cell_type": "markdown", "metadata": meta, "source": source})
+        else:
+            nb_cells.append({"cell_type": "code", "execution_count": None, "metadata": meta,
+                             "outputs": [], "source": source})
+    nb = {"cells": nb_cells,
+          "metadata": {"application/vnd.databricks.v1+notebook": {
+              "language": "python", "notebookMetadata": {"pythonIndentUnit": 4},
+              "notebookName": f"{lesson} - {title}", "widgets": {}},
+              "language_info": {"name": "python"}},
+          "nbformat": 4, "nbformat_minor": 0}
+    return json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
+
+
 def build(lesson, mode, allow_stale=False):
     title, body = read_source(lesson)
     body, solutions = apply_blocks(body, mode)
-    cells = [expand_solutions(c, solutions) for c in split_cells(body)]
+    cells = [apply_expect_failure(expand_solutions(c, solutions), mode) for c in split_cells(body)]
 
     lacking = [i for i in STANDARD_IDS if i not in solutions]
     if lacking:
@@ -174,82 +291,57 @@ def build(lesson, mode, allow_stale=False):
     if bad:
         raise BuildError(f"block ids must start with W (warm-up) or P (practice): {bad}")
 
-    # The state cell goes before the first code cell, so every validation cell can use it
-    first_code = next((i for i, c in enumerate(cells) if not is_markdown(c)), len(cells))
-    cells.insert(first_code, STATE_CELL)
-
+    BUILD.mkdir(parents=True, exist_ok=True)
     if mode == "solved":
+        # The state cell goes before the first code cell, so every validation cell can use it
+        first_code = next((i for i, c in enumerate(cells) if not is_markdown(c)), len(cells))
+        cells.insert(first_code, STATE_CELL.format(lesson=lesson.lower(), harness=HARNESS_NAME))
         warmup = sorted(i for i in solutions if i.startswith("W"))
         practice = sorted(i for i in solutions if i.startswith("P"))
         cells += [CHECK_CELL.format(warmup=warmup, practice=practice), EXIT_CELL]
+        (BUILD / f"{HARNESS_NAME}.py").write_text(HARNESS, encoding="utf-8", newline="\n")
         out_path = BUILD / f"{lesson}_solved.py"
-    else:
-        latest = LESSONS / f"{lesson}.json"
-        if not latest.exists():
-            raise BuildError(f"{latest} does not exist: run _authoring/run_lesson.py {lesson} first")
-        record = json.loads(latest.read_text(encoding="utf-8"))
-        solved_hash = lesson_code_hash(lesson)
-        if record.get("code_hash") != solved_hash and not allow_stale:
-            raise BuildError(
-                f"{latest} was produced by different code (run {record.get('code_hash')}, source now {solved_hash}). "
-                f"Run _authoring/run_lesson.py {lesson} again, or pass --allow-stale.")
-        cells = fill_placeholders(cells, record["metrics"], latest.relative_to(ROOT))
-        out_path = NOTEBOOKS / f"{lesson} - {title}.py"
+        out_path.write_text(HEADER + "\n" + CELL_SEP.join(cells) + "\n", encoding="utf-8", newline="\n")
+        return out_path, title
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(HEADER + "\n" + CELL_SEP.join(cells) + "\n", encoding="utf-8", newline="\n")
+    latest = LESSONS / f"{lesson}.json"
+    if not latest.exists():
+        raise BuildError(f"{latest} does not exist: run _authoring/run_lesson.py {lesson} first")
+    record = json.loads(latest.read_text(encoding="utf-8"))
+    solved_hash = code_hash(build_cells_only(lesson))
+    if record.get("code_hash") != solved_hash and not allow_stale:
+        raise BuildError(
+            f"{latest} was produced by different code (run {record.get('code_hash')}, source now {solved_hash}). "
+            f"Run _authoring/run_lesson.py {lesson} again, or pass --allow-stale.")
+    cells = [strip_test_lines(c, i) for i, c in enumerate(cells)]
+    for i, c in enumerate(cells):
+        if not is_markdown(c):
+            check_compiles(c, i)
+    cells = fill_placeholders(cells, record["metrics"], latest.relative_to(ROOT))
+    out_path = NOTEBOOKS / f"{lesson} - {title}.ipynb"
+    out_path.write_text(to_ipynb(cells, lesson, title), encoding="utf-8", newline="\n")
     return out_path, title
 
 
 def build_cells_only(lesson):
-    """The cells of the solved notebook, used for code_hash."""
+    """The cells of the solved notebook before test wrapping, used for code_hash."""
     _, body = read_source(lesson)
     body, solutions = apply_blocks(body, "solved")
     return [expand_solutions(c, solutions) for c in split_cells(body)]
 
 
-def companion_sources(lesson):
-    """[(name, title, cells)] for every _authoring/LNN.<name>.py."""
-    out = []
-    for path in sorted(LESSONS.glob(f"{lesson}.*.py")):
-        title, body = read_source_file(path)
-        out.append((path.stem.split(".", 1)[1], title, split_cells(body)))
-    return out
-
-
-def build_companions(lesson, mode):
-    """Write the companion notebooks; return [(local path, workspace title)]."""
-    built = []
-    for name, title, cells in companion_sources(lesson):
-        out_path = BUILD / f"{lesson}.{name}.py" if mode == "solved" else NOTEBOOKS / f"{title}.py"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(HEADER + "\n" + CELL_SEP.join(cells) + "\n", encoding="utf-8", newline="\n")
-        built.append((out_path, title))
-    return built
-
-
-def lesson_code_hash(lesson):
-    """code_hash of the solved lesson plus all companion notebooks."""
-    cells = build_cells_only(lesson)
-    for _, _, comp_cells in companion_sources(lesson):
-        cells += comp_cells
-    return code_hash(cells)
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("lesson", help="lesson id, e.g. L02")
+    p.add_argument("lesson", help="lesson id, e.g. L03")
     p.add_argument("--mode", choices=["solved", "learner"], required=True)
     p.add_argument("--allow-stale", action="store_true",
                    help="learner mode: use _authoring/LNN.json even if the code changed since that run")
     args = p.parse_args()
     try:
         path, _ = build(args.lesson, args.mode, args.allow_stale)
-        companions = build_companions(args.lesson, args.mode)
     except BuildError as e:
         sys.exit(f"BUILD FAILED: {e}")
-    for p in [path] + [c for c, _ in companions]:
-        print(f"built {p.relative_to(ROOT)}")
+    print(f"built {path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
     python _authoring/run_lesson.py L02             build solved, import, run once
     python _authoring/run_lesson.py L02 --twice     run twice and diff METRICS (keys starting with "nd." are ignored)
-    python _authoring/run_lesson.py L02 --publish   build the learner notebooks into "Databricks - Learning/" (no run)
+    python _authoring/run_lesson.py L02 --publish   build the learner notebook (.ipynb) into "Databricks - Learning/" (no run)
 
 Results: _authoring/build/runs/LNN_<UTC timestamp>.json for every run; _authoring/LNN.json only after a successful run.
 Test builds are imported to <home>/_lesson_build, outside the Git folder (<home> from `databricks current-user me`).
@@ -131,18 +131,16 @@ def main():
     p.add_argument("lesson", help="lesson id, e.g. L02")
     p.add_argument("--twice", action="store_true", help="run two times and diff METRICS")
     p.add_argument("--publish", action="store_true",
-                   help='build the learner notebooks into "Databricks - Learning/" (no run)')
+                   help='build the learner notebook (.ipynb) into "Databricks - Learning/" (no run)')
     p.add_argument("--profile", default="DEFAULT", help="Databricks CLI profile (default: DEFAULT)")
     args = p.parse_args()
 
     if args.publish:
         try:
             path, _ = build_notebook.build(args.lesson, "learner")
-            built = [path] + [c for c, _ in build_notebook.build_companions(args.lesson, "learner")]
         except build_notebook.BuildError as e:
             sys.exit(f"FAILED: {e}")
-        for p_ in built:
-            print(f"built {p_.relative_to(ROOT)}")
+        print(f"built {path.relative_to(ROOT)}")
         print("Next: commit and push, then Pull in the workspace Git folder.")
         return
 
@@ -151,12 +149,12 @@ def main():
         target = build_dir(cli)
         path, _ = build_notebook.build(args.lesson, "solved")
         print(f"built {path.relative_to(ROOT)}")
-        code_hash = build_notebook.lesson_code_hash(args.lesson)
+        code_hash = build_notebook.code_hash(build_notebook.build_cells_only(args.lesson))
         notebook = f"{target}/{args.lesson}_solved"
         import_notebook(cli, path, notebook)
-        # Companions sit next to the lesson notebook, so dbutils.notebook.run("./<title>") finds them
-        for comp_path, comp_title in build_notebook.build_companions(args.lesson, "solved"):
-            import_notebook(cli, comp_path, f"{target}/{comp_title}")
+        # The harness sits next to the solved notebook, so run_expecting_failure finds it with "./"
+        harness = build_notebook.BUILD / f"{build_notebook.HARNESS_NAME}.py"
+        import_notebook(cli, harness, f"{target}/{build_notebook.HARNESS_NAME}")
 
         results = []
         for i in range(2 if args.twice else 1):

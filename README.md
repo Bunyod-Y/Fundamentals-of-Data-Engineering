@@ -30,7 +30,7 @@ your knowledge with exam-style questions — all in one notebook.
 ```
 Fundamentals-of-Data-Engineering/
 ├── Databricks - Learning/   ← every notebook you study (open these in Databricks)
-├── _authoring/              ← only for making new lessons: sources with solutions, specs, verified runs, build tools
+├── _authoring/              ← only for making new lessons: CURRICULUM.md, PROGRESS.md, LNN.md specs, LNN.py sources, verified runs, build tools
 ├── CLAUDE.md                ← rules for writing lessons
 └── README.md
 ```
@@ -44,9 +44,11 @@ Fundamentals-of-Data-Engineering/
 | L01 - Lakehouse Basics | Unity Catalog namespace, notebooks, compute, Delta tables, DML, MERGE, history, time travel, RESTORE, UNDROP |
 | L01 - Practical Purposes | quick navigation queries (SHOW / USE) |
 | L02 - Delta Lake Deep Dive | schema evolution, constraints, generated/identity columns, managed vs external, CLONE, maintenance |
-| L03 - Ingestion with Auto Loader, read_files and COPY INTO | read_files, COPY INTO idempotency, Auto Loader, schema evolution, rescued data, `cloud_files_state` |
-| L03 - Bronze Ingestion | helper notebook that L03 runs with `dbutils.notebook.run` (do not run it by hand) |
-| L04 - Structured Streaming Fundamentals | readStream/writeStream, triggers, output modes, watermarks, foreachBatch, checkpoints, deduplication |
+| L03 - Spark SQL Transformations | joins incl. SEMI/ANTI/CROSS, NULL keys and `<=>`, the `NOT IN` + NULL trap, `QUALIFY` dedup, `LAG`/`LEAD`, window frames and ties, ranking functions, `ROLLUP`/`CUBE`/`GROUPING SETS`, `PIVOT`/`UNPIVOT`, higher-order functions, set operators, `FILTER` vs `CASE` |
+| L04 - PySpark DataFrame API, Transforms and UDFs | the L03 queries in PySpark, lazy evaluation on serverless (Spark Connect), `explain()` and broadcast joins, DDL vs `StructType`, `DataFrame.transform`, caching on serverless, Python vs Pandas UDFs (5M-row timing), wrong `returnType` → silent NULLs, Unity Catalog SQL and Python functions |
+| L05 - Semi-structured Data - JSON, Nested Types and VARIANT | FHIR-like JSON: `STRUCT`/`ARRAY` dot notation, `explode` vs `explode_outer` (lost rows), colon paths on JSON strings and their case rules, `from_json` / `schema_of_json` / `to_json`, `VARIANT` (`parse_json` vs `try_parse_json`, `variant_get` vs `try_variant_get`, `schema_of_variant(_agg)`, `variant_explode`, limits), malformed records across nine methods, flattening bronze to silver patients and observations |
+| L06 - Ingestion with Auto Loader, read_files and COPY INTO | read_files, COPY INTO idempotency, Auto Loader, schema evolution, rescued data, `cloud_files_state` |
+| L11 - Structured Streaming Fundamentals | readStream/writeStream, triggers, output modes, watermarks, foreachBatch, checkpoints, deduplication |
 
 New lessons (L03 and later) are tested before they are published: the solved version runs twice on
 serverless, and every number in the text comes from that run.
@@ -115,16 +117,15 @@ serverless, and every number in the text comes from that run.
 
 ## 📈 Learning Path
 
+22 lessons are planned (`_authoring/CURRICULUM.md`, progress in `_authoring/PROGRESS.md`).
+Numbers follow the plan, so the notebooks that exist today are L01, L02, L03, L04, L05, L06 and L11.
+
 ```
-L01 – Lakehouse Basics
- ▼
-L02 – Delta Lake Deep Dive
- ▼
-L03 – Ingestion (Auto Loader, read_files, COPY INTO)
- ▼
-L04 – Structured Streaming Fundamentals
- ▼
-Next: Lakeflow Declarative Pipelines, PySpark transformations, Lakeflow Jobs, Unity Catalog governance
+L01 Lakehouse Basics → L02 Delta Lake Deep Dive → L03 Spark SQL → L04 PySpark → L05 JSON/VARIANT
+→ L06 Ingestion → L07–L08 Lakeflow Declarative Pipelines → L09 Lakeflow Jobs → L10 Unity Catalog
+→ L11–L12 Structured Streaming → L13 Delta optimization → L14 CDF → L15 Testing → L16 Monitoring
+→ L17 Security → L18 Data modeling → L19 Performance → L20 Advanced ingestion & sharing
+→ L21 Declarative Automation Bundles → L22 Mock exam
 ```
 
 ---
