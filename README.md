@@ -29,71 +29,27 @@ your knowledge with exam-style questions — all in one notebook.
 
 ```
 Fundamentals-of-Data-Engineering/
-├── Python/
-│   └── basic_python_concepts        ← Python fundamentals: data types, collections
-├── Databricks - Learning/
-│   └── Structured Streaming Fundamentals  ← Core streaming: readStream, watermarks, dedup, checkpoints
-└── README.md                          ← You are here
+├── Databricks - Learning/   ← every notebook you study (open these in Databricks)
+├── _authoring/              ← only for making new lessons: sources with solutions, specs, verified runs, build tools
+├── CLAUDE.md                ← rules for writing lessons
+└── README.md
 ```
 
 ---
 
-## 📓 Notebooks
+## 📓 Notebooks (`Databricks - Learning/`)
 
-### 1. Python — `basic_python_concepts`
-
-| | |
+| Notebook | Topics |
 |---|---|
-| **Location** | `Python/basic_python_concepts` |
-| **Level** | Beginner |
-| **Prerequisites** | None |
-| **What you'll learn** | Python data types, mutable vs immutable collections, lists vs tuples vs sets vs dictionaries |
+| L01 - Lakehouse Basics | Unity Catalog namespace, notebooks, compute, Delta tables, DML, MERGE, history, time travel, RESTORE, UNDROP |
+| L01 - Practical Purposes | quick navigation queries (SHOW / USE) |
+| L02 - Delta Lake Deep Dive | schema evolution, constraints, generated/identity columns, managed vs external, CLONE, maintenance |
+| L03 - Ingestion with Auto Loader, read_files and COPY INTO | read_files, COPY INTO idempotency, Auto Loader, schema evolution, rescued data, `cloud_files_state` |
+| L03 - Bronze Ingestion | helper notebook that L03 runs with `dbutils.notebook.run` (do not run it by hand) |
+| L04 - Structured Streaming Fundamentals | readStream/writeStream, triggers, output modes, watermarks, foreachBatch, checkpoints, deduplication |
 
-A quick reference notebook covering Python's core data types grouped into three
-categories:
-- **No value** — `None`
-- **Single value** — `int`, `float`, `str`, `bool`, `complex`
-- **Multiple values** — `list`, `tuple`, `dict`, `set`, `frozenset`, `range`
-
-Start here if you're new to Python before diving into the Databricks notebooks.
-
----
-
-### 2. Structured Streaming Fundamentals
-
-| | |
-|---|---|
-| **Location** | `Databricks - Learning/Structured Streaming Fundamentals` |
-| **Level** | Intermediate |
-| **Prerequisites** | Basic Python, basic SQL, a Databricks workspace (Serverless compute works) |
-| **What you'll learn** | Spark Structured Streaming end-to-end: reading streams, writing to sinks, watermarks, output modes, triggers, checkpoints, deduplication, and exam-ready patterns |
-
-This is the flagship notebook — a complete lesson with **48 cells** organized into
-10 sections:
-
-| Section | What it covers |
-|---|---|
-| **1. Title & Setup** | Creates a healthcare schema (`main.dbacademy_streaming`) with 6 tables (patients, encounters, claims, lab results, vital signs, FHIR resources) and a UC volume for checkpoints |
-| **2. Concepts** | 6 markdown cells explaining streaming vs batch, `readStream`/`writeStream`, output modes (append / update / complete), watermarks & late data, triggers (serverless-safe `availableNow`), and checkpointing |
-| **3. Demos** | 7 live demos, each following a **Predict → Code → Explained** pattern: |
-| | • **Demo 1** — Read a Delta table as a stream and write to memory |
-| | • **Demo 2** — Compare append, update, and complete output modes side-by-side |
-| | • **Demo 3** — Window aggregation with watermark (10-min tumbling windows) |
-| | • **Demo 4** — Late events: see the watermark drop events that arrive too late |
-| | • **Demo 5** — `foreachBatch` + `MERGE` for upserts into a Delta table |
-| | • **Demo 6** — Checkpoint recovery: crash mid-stream, restart with same checkpoint |
-| | • **Demo 7** — Streaming deduplication: `dropDuplicates` vs `dropDuplicatesWithinWatermark` on `event_id` (three approaches, three different results) |
-| **4. Cheat Sheet** | A single-cell syntax reference: read, write, watermark, window, foreachBatch, dedup, checkpoint — copy-paste patterns for the exam |
-| **5. Check Understanding** | 3 open-ended conceptual questions (no code) |
-| **6. Labs** | 4 hands-on exercises at 3 difficulty levels: |
-| | • **Level 1** — Fill in the blanks (filter a streaming DataFrame) |
-| | • **Level 2** — Fix the bug (watermark + trigger, two bugs to find) |
-| | • **Level 2b** — Fix the bug: streaming deduplication (`dropDuplicatesWithinWatermark` without `withWatermark`) |
-| | • **Level 3** — Build from scratch (filtered, windowed aggregation with checkpoint) |
-| | Each lab has a **validation cell** that prints ✅ or a hint |
-| **7. Exam Questions** | 7 multiple-choice questions in the style of the Databricks certification exams |
-| **8. Solutions** | Full answers and explanations for every conceptual question and exam MCQ |
-| **9. Cleanup** | Drops the schema and all tables — run this when you're done |
+New lessons (L03 and later) are tested before they are published: the solved version runs twice on
+serverless, and every number in the text comes from that run.
 
 ---
 
@@ -129,7 +85,7 @@ This is the flagship notebook — a complete lesson with **48 cells** organized 
 | **Databricks workspace** | Any tier (Community, Premium, or trial) |
 | **Compute** | Serverless compute works out of the box. Classic clusters need DBR 13.3+ |
 | **Unity Catalog** | The notebooks use `main.dbacademy_streaming` — you need `USE CATALOG` on `main` |
-| **Python** | Basic familiarity (the Python notebook can help if you're rusty) |
+| **Python** | Basic familiarity |
 | **SQL** | Basic SELECT / GROUP BY / MERGE knowledge |
 
 > **No Unity Catalog?** Modify the `FULL_SCHEMA` variable at the top of the setup
@@ -160,19 +116,15 @@ This is the flagship notebook — a complete lesson with **48 cells** organized 
 ## 📈 Learning Path
 
 ```
-Python basics (if needed)
-       │
-       ▼
-Structured Streaming Fundamentals  ◄── you are here
-       │
-       ▼
-  Delta Lake (coming soon)
-       │
-       ▼
-  Unity Catalog (coming soon)
-       │
-       ▼
-  Lakeflow Jobs & Pipelines (coming soon)
+L01 – Lakehouse Basics
+ ▼
+L02 – Delta Lake Deep Dive
+ ▼
+L03 – Ingestion (Auto Loader, read_files, COPY INTO)
+ ▼
+L04 – Structured Streaming Fundamentals
+ ▼
+Next: Lakeflow Declarative Pipelines, PySpark transformations, Lakeflow Jobs, Unity Catalog governance
 ```
 
 ---

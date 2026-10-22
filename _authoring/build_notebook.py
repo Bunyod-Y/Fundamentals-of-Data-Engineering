@@ -1,19 +1,19 @@
-"""Build a lesson notebook from lessons/src/LNN.py (Databricks source format).
+"""Build a lesson notebook from _authoring/LNN.py (Databricks source format).
 
-    python tools/build_notebook.py L02 --mode solved    -> build/L02_solved.py
-    python tools/build_notebook.py L02 --mode learner   -> notebooks/L02 - <title>.py
+    python _authoring/build_notebook.py L02 --mode solved    -> _authoring/build/L02_solved.py
+    python _authoring/build_notebook.py L02 --mode learner   -> Databricks - Learning/L02 - <title>.py
 
-Source conventions (lessons/src/LNN.py):
+Source conventions (_authoring/LNN.py):
   line 1   # Databricks notebook source
   line 2   # LESSON_TITLE: <title>              (removed from the output)
   cells    separated by "# COMMAND ----------"; markdown cells use "# MAGIC %md"
   blocks   # >>> BLANK P1 / # >>> SOLUTION P1 / # <<< END P1   (ids: W1.. warm-up, P1.. practice)
-  {{key}}            in markdown: replaced by METRICS[key] from runs/LNN_latest.json (learner mode)
+  {{key}}            in markdown: replaced by METRICS[key] from _authoring/LNN.json (learner mode)
   {{solution:P1}}    alone on a markdown line: replaced by the SOLUTION P1 code (both modes)
 
-Companion notebooks (lessons/src/LNN.<name>.py, same two header lines) are notebooks that the lesson
+Companion notebooks (_authoring/LNN.<name>.py, same two header lines) are notebooks that the lesson
 calls with dbutils.notebook.run("./<title>"). They are copied as they are (no blocks, no placeholders)
-to build/LNN.<name>.py and notebooks/<title>.py, and imported next to the lesson notebook.
+to _authoring/build/LNN.<name>.py and Databricks - Learning/<title>.py, next to the lesson notebook.
 """
 import argparse
 import hashlib
@@ -23,6 +23,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+LESSONS = ROOT / "_authoring"                    # sources, specs and verified run results (LNN.json)
+NOTEBOOKS = ROOT / "Databricks - Learning"       # learner notebooks (what you study)
+BUILD = LESSONS / "build"                        # solved builds and run history (git-ignored)
 HEADER = "# Databricks notebook source"
 CELL_SEP = "\n\n# COMMAND ----------\n\n"
 SEP_LINE = "# COMMAND ----------"
@@ -56,7 +59,7 @@ class BuildError(Exception):
 
 
 def read_source(lesson):
-    path = ROOT / "lessons" / "src" / f"{lesson}.py"
+    path = LESSONS / f"{lesson}.py"
     if not path.exists():
         raise BuildError(f"{path} does not exist")
     return read_source_file(path)
@@ -179,19 +182,19 @@ def build(lesson, mode, allow_stale=False):
         warmup = sorted(i for i in solutions if i.startswith("W"))
         practice = sorted(i for i in solutions if i.startswith("P"))
         cells += [CHECK_CELL.format(warmup=warmup, practice=practice), EXIT_CELL]
-        out_path = ROOT / "build" / f"{lesson}_solved.py"
+        out_path = BUILD / f"{lesson}_solved.py"
     else:
-        latest = ROOT / "runs" / f"{lesson}_latest.json"
+        latest = LESSONS / f"{lesson}.json"
         if not latest.exists():
-            raise BuildError(f"{latest} does not exist: run tools/run_lesson.py {lesson} first")
+            raise BuildError(f"{latest} does not exist: run _authoring/run_lesson.py {lesson} first")
         record = json.loads(latest.read_text(encoding="utf-8"))
         solved_hash = lesson_code_hash(lesson)
         if record.get("code_hash") != solved_hash and not allow_stale:
             raise BuildError(
                 f"{latest} was produced by different code (run {record.get('code_hash')}, source now {solved_hash}). "
-                f"Run tools/run_lesson.py {lesson} again, or pass --allow-stale.")
+                f"Run _authoring/run_lesson.py {lesson} again, or pass --allow-stale.")
         cells = fill_placeholders(cells, record["metrics"], latest.relative_to(ROOT))
-        out_path = ROOT / "notebooks" / f"{lesson} - {title}.py"
+        out_path = NOTEBOOKS / f"{lesson} - {title}.py"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(HEADER + "\n" + CELL_SEP.join(cells) + "\n", encoding="utf-8", newline="\n")
@@ -206,9 +209,9 @@ def build_cells_only(lesson):
 
 
 def companion_sources(lesson):
-    """[(name, title, cells)] for every lessons/src/LNN.<name>.py."""
+    """[(name, title, cells)] for every _authoring/LNN.<name>.py."""
     out = []
-    for path in sorted((ROOT / "lessons" / "src").glob(f"{lesson}.*.py")):
+    for path in sorted(LESSONS.glob(f"{lesson}.*.py")):
         title, body = read_source_file(path)
         out.append((path.stem.split(".", 1)[1], title, split_cells(body)))
     return out
@@ -218,7 +221,7 @@ def build_companions(lesson, mode):
     """Write the companion notebooks; return [(local path, workspace title)]."""
     built = []
     for name, title, cells in companion_sources(lesson):
-        out_path = ROOT / "build" / f"{lesson}.{name}.py" if mode == "solved" else ROOT / "notebooks" / f"{title}.py"
+        out_path = BUILD / f"{lesson}.{name}.py" if mode == "solved" else NOTEBOOKS / f"{title}.py"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(HEADER + "\n" + CELL_SEP.join(cells) + "\n", encoding="utf-8", newline="\n")
         built.append((out_path, title))
@@ -238,7 +241,7 @@ def main():
     p.add_argument("lesson", help="lesson id, e.g. L02")
     p.add_argument("--mode", choices=["solved", "learner"], required=True)
     p.add_argument("--allow-stale", action="store_true",
-                   help="learner mode: use runs/LNN_latest.json even if the code changed since that run")
+                   help="learner mode: use _authoring/LNN.json even if the code changed since that run")
     args = p.parse_args()
     try:
         path, _ = build(args.lesson, args.mode, args.allow_stale)

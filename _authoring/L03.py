@@ -1,4 +1,8 @@
 # Databricks notebook source
+# LESSON_TITLE: Ingestion with Auto Loader, read_files and COPY INTO
+
+# COMMAND ----------
+
 # DBTITLE 1,1 — Title
 # MAGIC %md
 # MAGIC # L03 — Ingestion with Auto Loader, read_files and COPY INTO
@@ -24,20 +28,11 @@
 
 # DBTITLE 1,2 — Warm-up (intro)
 # MAGIC %md
-# MAGIC ## 2 Warm-up — recall Lesson 2 (no hints)
+# MAGIC ## 2 Warm-up — recall L02 Delta Lake Deep Dive (no hints)
 # MAGIC
 # MAGIC Write each task from memory. Run the validation cell after each one. Solutions are in section 11.
 # MAGIC
 # MAGIC > The warm-up uses its own small tables. Run the next cell first: it creates the lesson schema and a helper.
-
-# COMMAND ----------
-
-# DBTITLE 1,Lesson state (do not edit)
-# METRICS holds the key numbers that the Explained cells quote.
-# The validation cells record here which warm-up and practice tasks passed.
-METRICS = {}
-WARMUP_PASSED = {}
-PRACTICE_PASSED = {}
 
 # COMMAND ----------
 
@@ -68,7 +63,15 @@ def error_class(e):
 # COMMAND ----------
 
 # DBTITLE 1,W1 Code
+# >>> BLANK W1
 # Your code here
+# >>> SOLUTION W1
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu1_claims")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu1_claims (claim_id INT, amount DOUBLE)")
+spark.sql("INSERT INTO main.dbacademy_l03.wu1_claims VALUES (1, 100.0), (2, 200.0)")
+new_rows = spark.createDataFrame([(3, 300.0, "Medicare"), (4, 400.0, "Aetna")], "claim_id INT, amount DOUBLE, payer STRING")
+new_rows.write.mode("append").option("mergeSchema", "true").saveAsTable("main.dbacademy_l03.wu1_claims")
+# <<< END W1
 
 # COMMAND ----------
 
@@ -96,7 +99,18 @@ except Exception as e:
 # COMMAND ----------
 
 # DBTITLE 1,W2 Code
+# >>> BLANK W2
 # Your code here
+# >>> SOLUTION W2
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu2_claims")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu2_claims (claim_id INT, amount DOUBLE)")
+spark.sql("ALTER TABLE main.dbacademy_l03.wu2_claims ADD CONSTRAINT positive_amount CHECK (amount > 0)")
+spark.sql("INSERT INTO main.dbacademy_l03.wu2_claims VALUES (1, 50.0)")
+try:
+    spark.sql("INSERT INTO main.dbacademy_l03.wu2_claims VALUES (2, -5.0)")
+except Exception as e:
+    print("rejected:", error_class(e))
+# <<< END W2
 
 # COMMAND ----------
 
@@ -123,7 +137,15 @@ except Exception as e:
 # COMMAND ----------
 
 # DBTITLE 1,W3 Code
+# >>> BLANK W3
 # Your code here
+# >>> SOLUTION W3
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_clone")
+spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_src")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu3_src AS SELECT CAST(id AS INT) AS id FROM range(1, 6)")
+spark.sql("CREATE TABLE main.dbacademy_l03.wu3_clone DEEP CLONE main.dbacademy_l03.wu3_src")
+spark.sql("DELETE FROM main.dbacademy_l03.wu3_clone WHERE id <= 2")
+# <<< END W3
 
 # COMMAND ----------
 
@@ -211,7 +233,7 @@ display(dbutils.fs.ls(CLAIMS_DIR))
 
 # DBTITLE 1,3 — Setup explained
 # MAGIC %md
-# MAGIC **Setup result (real run):** 3 JSON files with 300 claims in total (75 of them `APPROVED`), and one CSV file with 10 providers.
+# MAGIC **Setup result (real run):** {{setup.claim_files}} JSON files with {{setup.claim_rows}} claims in total ({{setup.approved}} of them `APPROVED`), and one CSV file with {{setup.provider_rows}} providers.
 # MAGIC
 # MAGIC The helper `land_claims(file_name, first_id, n, extra=None, bad_amount_ids=())` writes one more JSON file into the landing folder. The examples call it to simulate new deliveries:
 # MAGIC * `extra={"payer": "Medicare"}` adds a **new column**;
@@ -407,10 +429,10 @@ assert METRICS["E1.rows"] == 300 and METRICS["E1.files"] == 3
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * `read_files` returned **300** rows from **3** files (100, 100, 100 rows per file, from `_metadata.file_name`).
-# MAGIC * Columns: `claim_amount, claim_id, claim_status, patient_id, provider_id, service_date, _rescued_data`. They come in alphabetical order, not in the order of the JSON keys.
+# MAGIC * `read_files` returned **{{E1.rows}}** rows from **{{E1.files}}** files ({{E1.rows_per_file}} rows per file, from `_metadata.file_name`).
+# MAGIC * Columns: `{{E1.columns}}`. They come in alphabetical order, not in the order of the JSON keys.
 # MAGIC * The last column, `_rescued_data`, is not in the files. `read_files` adds a rescued data column by default (*read_files* reference).
-# MAGIC * Inferred types: `claim_id` = `bigint`, `claim_amount` = `double`, `service_date` = `string`. `read_files` infers types (`inferColumnTypes` is `true` by default), but the date text `"2026-03-05"` stays a string. Use `schemaHints => 'service_date DATE'` or a cast if you need a date.
+# MAGIC * Inferred types: `claim_id` = `{{E1.type_claim_id}}`, `claim_amount` = `{{E1.type_claim_amount}}`, `service_date` = `{{E1.type_service_date}}`. `read_files` infers types (`inferColumnTypes` is `true` by default), but the date text `"2026-03-05"` stays a string. Use `schemaHints => 'service_date DATE'` or a cast if you need a date.
 # MAGIC
 # MAGIC > **Key takeaway:** `read_files` is the fastest way to look at raw files with SQL. It reads all files on every query and stores nothing.
 
@@ -456,9 +478,9 @@ assert METRICS["E2.rf_rows"] == 10
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * `spark.read.csv(path)` with no options: columns `_c0, _c1, _c2, _c3` and **11** rows. The header line became a normal data row, and the first column has type `string`. The plain CSV reader does not use the header and does not infer types unless you ask for it.
-# MAGIC * `read_files(…, format => 'csv', header => true)`: **10** rows, real column names, and inferred types: `provider_id` = `int`, `npi` = `int`.
-# MAGIC * `schemaHints => 'npi STRING'` changed only that column: `npi` = `string`, while `provider_id` was still inferred as `int`.
+# MAGIC * `spark.read.csv(path)` with no options: columns `{{E2.plain_columns}}` and **{{E2.plain_rows}}** rows. The header line became a normal data row, and the first column has type `{{E2.plain_type_first}}`. The plain CSV reader does not use the header and does not infer types unless you ask for it.
+# MAGIC * `read_files(…, format => 'csv', header => true)`: **{{E2.rf_rows}}** rows, real column names, and inferred types: `provider_id` = `{{E2.rf_type_provider_id}}`, `npi` = `{{E2.rf_type_npi}}`.
+# MAGIC * `schemaHints => 'npi STRING'` changed only that column: `npi` = `{{E2.hint_type_npi}}`, while `provider_id` was still inferred as `{{E2.hint_type_provider_id}}`.
 # MAGIC
 # MAGIC > **Key takeaway:** an identifier such as an NPI is a code, not a number: you never add NPIs, and some codes start with 0. Keep such columns as `STRING` with `schemaHints`; you do not need to write the whole schema.
 
@@ -510,11 +532,11 @@ assert METRICS["E3.after_run1"] == 300 and METRICS["E3.after_run2"] == 300 and M
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * `COPY INTO` returns one row with the columns `num_affected_rows, num_inserted_rows, num_skipped_corrupt_files`.
-# MAGIC * Run 1 loaded the table that had **no columns**: `num_inserted_rows` = **300**, table rows = 300. `mergeSchema` let the first load create the columns.
-# MAGIC * Run 2 with the same files: `num_inserted_rows` = **0**, table rows = 300. The files were already loaded, so they were skipped. This is the idempotency from the docs.
-# MAGIC * After a new 50-claim file arrived, run 3 inserted **50** rows (table rows = 350). Only the new file was loaded.
-# MAGIC * `claim_amount` in the table is `double`: the JSON reader behind `COPY INTO` infers types. Compare with Auto Loader in E4.
+# MAGIC * `COPY INTO` returns one row with the columns `{{E3.result_columns}}`.
+# MAGIC * Run 1 loaded the table that had **no columns**: `num_inserted_rows` = **{{E3.run1_inserted}}**, table rows = {{E3.after_run1}}. `mergeSchema` let the first load create the columns.
+# MAGIC * Run 2 with the same files: `num_inserted_rows` = **{{E3.run2_inserted}}**, table rows = {{E3.after_run2}}. The files were already loaded, so they were skipped. This is the idempotency from the docs.
+# MAGIC * After a new 50-claim file arrived, run 3 inserted **{{E3.run3_inserted}}** rows (table rows = {{E3.after_run3}}). Only the new file was loaded.
+# MAGIC * `claim_amount` in the table is `{{E3.type_claim_amount}}`: the JSON reader behind `COPY INTO` infers types. Compare with Auto Loader in E4.
 # MAGIC
 # MAGIC > **Key takeaway:** `COPY INTO` can run again and again (a nightly job, a retry after an error) without duplicates. `COPY_OPTIONS ('force' = 'true')` switches this off.
 
@@ -578,12 +600,12 @@ assert METRICS["E4.run1_added"] == 350 and METRICS["E4.run2_added"] == 0 and MET
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * Run 1 added **350** rows: every file that was in the folder (the 3 setup files and the file from E3).
-# MAGIC * Run 2 added **0** rows: no new files. The checkpoint remembers the loaded files, so nothing is read twice.
-# MAGIC * After a new 25-claim file, run 3 added **25** rows. Total: 375 rows.
-# MAGIC * Types without `cloudFiles.inferColumnTypes`: `claim_amount` = `string`, `claim_id` = `string`. As the docs say, Auto Loader infers **all columns as strings** for JSON, CSV and XML. `read_files` (E1) and `COPY INTO` (E3) inferred numbers from the same files.
-# MAGIC * Columns: `claim_amount, claim_id, claim_status, patient_id, provider_id, service_date, _rescued_data`. Auto Loader added `_rescued_data` by itself.
-# MAGIC * `cloud_files_state(checkpoint)` listed **5** files, with the columns `path, size, create_time, discovery_time, commit_time, archive_time, source_id, processed_time, ingestion_state, archive_mode, move_location`. This is the built-in way to see which files a stream has loaded.
+# MAGIC * Run 1 added **{{E4.run1_added}}** rows: every file that was in the folder (the 3 setup files and the file from E3).
+# MAGIC * Run 2 added **{{E4.run2_added}}** rows: no new files. The checkpoint remembers the loaded files, so nothing is read twice.
+# MAGIC * After a new 25-claim file, run 3 added **{{E4.run3_added}}** rows. Total: {{E4.total}} rows.
+# MAGIC * Types without `cloudFiles.inferColumnTypes`: `claim_amount` = `{{E4.type_claim_amount}}`, `claim_id` = `{{E4.type_claim_id}}`. As the docs say, Auto Loader infers **all columns as strings** for JSON, CSV and XML. `read_files` (E1) and `COPY INTO` (E3) inferred numbers from the same files.
+# MAGIC * Columns: `{{E4.columns}}`. Auto Loader added `_rescued_data` by itself.
+# MAGIC * `cloud_files_state(checkpoint)` listed **{{E4.state_files}}** files, with the columns `{{E4.state_columns}}`. This is the built-in way to see which files a stream has loaded.
 # MAGIC
 # MAGIC > **Key takeaway:** the same folder (checkpoint + `cloudFiles.schemaLocation`) is the memory of the stream. If you delete it, the next run loads every file again.
 
@@ -644,15 +666,15 @@ print(dbutils.fs.head(f"{BRONZE_CKPT}/_schemas/{schema_files[-1]}", 1000))   # t
 # MAGIC
 # MAGIC | Run | Writer `mergeSchema` | Status | Rows added | Error classes |
 # MAGIC | --- | --- | --- | --- | --- |
-# MAGIC | A | no | FAILED | 0 | `STREAM_FAILED, UNKNOWN_FIELD_EXCEPTION.NEW_FIELDS_IN_RECORD_WITH_FILE_PATH` |
-# MAGIC | B (restart, same code) | no | FAILED | 0 | `STREAM_FAILED, DELTA_METADATA_MISMATCH` |
-# MAGIC | C (restart) | yes | SUCCESS | 20 | none |
+# MAGIC | A | no | {{E5.runA_status}} | {{E5.runA_added}} | `{{E5.runA_errors}}` |
+# MAGIC | B (restart, same code) | no | {{E5.runB_status}} | {{E5.runB_added}} | `{{E5.runB_errors}}` |
+# MAGIC | C (restart) | yes | {{E5.runC_status}} | {{E5.runC_added}} | {{E5.runC_errors}} |
 # MAGIC
-# MAGIC * **Run A** stopped as the docs describe: the new column `payer` raised `UNKNOWN_FIELD_EXCEPTION` (wrapped in `STREAM_FAILED`). Before it stopped, Auto Loader saved a new schema version. The `_schemas` folder now holds the files `0, 1`: version 0 from the first run and version 1 with `payer`.
+# MAGIC * **Run A** stopped as the docs describe: the new column `payer` raised `UNKNOWN_FIELD_EXCEPTION` (wrapped in `STREAM_FAILED`). Before it stopped, Auto Loader saved a new schema version. The `_schemas` folder now holds the files `{{E5.schema_files}}`: version 0 from the first run and version 1 with `payer`.
 # MAGIC * **Run B** shows something the docs page does not say directly: a restart with the same code fails again, now with `DELTA_METADATA_MISMATCH`. The **source** schema has the new column, but the **Delta table** does not, and the writer may not add columns.
-# MAGIC * **Run C** added `.option("mergeSchema", "true")` on the **writer**. Now the table has the columns `claim_amount, claim_id, claim_status, patient_id, provider_id, service_date, _rescued_data, payer`. `payer` is filled for 20 rows (the new file only); older rows have NULL. Total rows: 395.
+# MAGIC * **Run C** added `.option("mergeSchema", "true")` on the **writer**. Now the table has the columns `{{E5.columns}}`. `payer` is filled for {{E5.payer_filled}} rows (the new file only); older rows have NULL. Total rows: {{E5.total}}.
 # MAGIC
-# MAGIC **Why a separate notebook?** In a test run of this lesson, `try/except` around the failing stream was not enough: the notebook cell still failed with `Some streams terminated before this command could finish!`, and this stopped the whole job (run 771734934782354, see `lessons/specs/L03.md`). A failed stream fails the cell, even if Python catches the exception. So E5 runs the stream in the companion notebook **`L03 - Bronze Ingestion`** with `dbutils.notebook.run`, like one run of a scheduled job. The caller catches the failed child run and restarts it.
+# MAGIC **Why a separate notebook?** In a test run of this lesson, `try/except` around the failing stream was not enough: the notebook cell still failed with `Some streams terminated before this command could finish!`, and this stopped the whole job (run 771734934782354, see `_authoring/L03.md`). A failed stream fails the cell, even if Python catches the exception. So E5 runs the stream in the companion notebook **`L03 - Bronze Ingestion`** with `dbutils.notebook.run`, like one run of a scheduled job. The caller catches the failed child run and restarts it.
 # MAGIC
 # MAGIC > **Key takeaway:** for `addNewColumns`, plan the restart (a job with retries, or a caller that restarts) **and** set `mergeSchema` on the writer. Otherwise the restart fails too.
 
@@ -714,14 +736,14 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC **Part A — type mismatch.** With `cloudFiles.inferColumnTypes = true`, the first run added 395 rows and `claim_amount` became `double`. Then a file with 3 `"N/A"` amounts arrived:
-# MAGIC * The stream did **not** fail. It added 10 rows.
-# MAGIC * For the 3 bad claims, `claim_amount` is NULL in 3 rows, and `_rescued_data` is filled in 3 rows.
-# MAGIC * Example `_rescued_data`: `{"claim_amount":"N/A","_file_path":"/Volumes/main/dbacademy_l03/data/landing/claims_json/claims_007.json"}`. It keeps the original value and the source file path, so you can fix the data later.
+# MAGIC **Part A — type mismatch.** With `cloudFiles.inferColumnTypes = true`, the first run added {{E6.typed_run1_added}} rows and `claim_amount` became `{{E6.typed_type_claim_amount}}`. Then a file with 3 `"N/A"` amounts arrived:
+# MAGIC * The stream did **not** fail. It added {{E6.typed_run2_added}} rows.
+# MAGIC * For the 3 bad claims, `claim_amount` is NULL in {{E6.bad_amount_null}} rows, and `_rescued_data` is filled in {{E6.bad_rescued}} rows.
+# MAGIC * Example `_rescued_data`: `{{E6.rescued_example}}`. It keeps the original value and the source file path, so you can fix the data later.
 # MAGIC
-# MAGIC **Part B — `schemaEvolutionMode = rescue`.** The first run added 405 rows. A file with the new column `plan_type` arrived, and the second run added 10 rows **without failing**.
-# MAGIC * Does the table have a `plan_type` column? **False**.
-# MAGIC * Rows with `_rescued_data` filled: 10. Example: `{"plan_type":"HMO","_file_path":"/Volumes/main/dbacademy_l03/data/landing/claims_json/claims_008.json"}`.
+# MAGIC **Part B — `schemaEvolutionMode = rescue`.** The first run added {{E6.rescue_run1_added}} rows. A file with the new column `plan_type` arrived, and the second run added {{E6.rescue_run2_added}} rows **without failing**.
+# MAGIC * Does the table have a `plan_type` column? **{{E6.rescue_has_plan_type}}**.
+# MAGIC * Rows with `_rescued_data` filled: {{E6.rescue_rows_with_rescued}}. Example: `{{E6.rescue_example}}`.
 # MAGIC
 # MAGIC > **Key takeaway:** rescued data means "never stop, never lose data". `addNewColumns` (E5) changes the table but stops the stream. `rescue` keeps the table schema stable and never stops for a new column.
 
@@ -745,7 +767,7 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC | 10 | "A wrong type (`"N/A"` in a number column) fails the stream or drops the row." | The value becomes NULL and the original value is saved in `_rescued_data` with the file path (E6). |
 # MAGIC | 11 | "The checkpoint folder alone is enough for schema inference." | Schema inference and evolution need `cloudFiles.schemaLocation` (Auto Loader schema docs). |
 # MAGIC | 12 | "`spark.read.csv(path)` uses the header row." | Not without `header`: you get `_c0, _c1, …` and the header as a data row (E2). |
-# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `lessons/specs/L03.md`). Restart through a job or a caller notebook. |
+# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `_authoring/L03.md`). Restart through a job or a caller notebook. |
 # MAGIC | 14 | "Auto Loader uses file notification mode by default." | The default is directory listing mode (*What is Auto Loader?*). |
 # MAGIC | 15 | "`DESCRIBE HISTORY` of the target lists the loaded files." | Use `cloud_files_state('<checkpoint>')` (E4). |
 
@@ -810,6 +832,7 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # COMMAND ----------
 
 # DBTITLE 1,P1 Code
+# >>> BLANK P1
 p1_query = (spark.readStream
     .format(<FILL_IN>)                                      # 1: the Auto Loader source
     .option(<FILL_IN>, "csv")                               # 2: the option that sets the file format
@@ -821,6 +844,19 @@ p1_query = (spark.readStream
     .trigger(<FILL_IN>)                                     # 3: load everything new, then stop
     .toTable(f"{FQ}.p1_providers"))
 p1_query.awaitTermination()
+# >>> SOLUTION P1
+p1_query = (spark.readStream
+    .format("cloudFiles")                                   # 1: the Auto Loader source
+    .option("cloudFiles.format", "csv")                     # 2: the option that sets the file format
+    .option("header", "true")                               # the CSV files have a header row
+    .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p1")
+    .load(PROVIDERS_DIR)
+    .writeStream
+    .option("checkpointLocation", f"{CHECKPOINTS}/p1")
+    .trigger(availableNow=True)                             # 3: load everything new, then stop
+    .toTable(f"{FQ}.p1_providers"))
+p1_query.awaitTermination()
+# <<< END P1
 
 # COMMAND ----------
 
@@ -850,6 +886,7 @@ METRICS["P1.rows"] = spark.table(f"{FQ}.p1_providers").count() if spark.catalog.
 # DBTITLE 1,P2 Code
 spark.sql(f"DROP TABLE IF EXISTS {FQ}.p2_claims")
 spark.sql(f"CREATE TABLE {FQ}.p2_claims")                     # schemaless target
+# >>> BLANK P2
 p2_sql = f"""
     COPY INTO {FQ}.p2_claims
     FROM '{CLAIMS_DIR}'
@@ -857,6 +894,15 @@ p2_sql = f"""
     PATTERN = 'claims_00[1-3].json'
     COPY_OPTIONS ('mergeSchema' = 'true', 'force' = 'true')
 """
+# >>> SOLUTION P2
+p2_sql = f"""
+    COPY INTO {FQ}.p2_claims
+    FROM '{CLAIMS_DIR}'
+    FILEFORMAT = JSON
+    PATTERN = 'claims_00[1-3].json'
+    COPY_OPTIONS ('mergeSchema' = 'true')
+"""
+# <<< END P2
 spark.sql(p2_sql)                                              # the nightly run
 spark.sql(p2_sql)                                              # the retry
 
@@ -892,7 +938,22 @@ METRICS["P2.rows"] = spark.table(f"{FQ}.p2_claims").count()
 # COMMAND ----------
 
 # DBTITLE 1,P3 Code
+# >>> BLANK P3
 # Your code here
+# >>> SOLUTION P3
+p3_query = (spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.inferColumnTypes", "true")                              # numbers instead of strings
+    .option("cloudFiles.schemaHints", "claim_amount DOUBLE, service_date DATE") # fix two types
+    .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p3")
+    .load(CLAIMS_DIR)
+    .writeStream
+    .option("checkpointLocation", f"{CHECKPOINTS}/p3")
+    .trigger(availableNow=True)
+    .toTable(f"{FQ}.p3_claims"))
+p3_query.awaitTermination()
+# <<< END P3
 
 # COMMAND ----------
 
@@ -926,7 +987,29 @@ except Exception as e:
 # COMMAND ----------
 
 # DBTITLE 1,P4 Code
+# >>> BLANK P4
 # Your code here
+# >>> SOLUTION P4
+def load_p4():
+    q = (spark.readStream
+        .format("cloudFiles")
+        .option("cloudFiles.format", "csv")
+        .option("header", "true")
+        .option("cloudFiles.schemaEvolutionMode", "rescue")       # never stop, never change the table
+        .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p4")
+        .load(PROVIDERS_DIR)
+        .writeStream
+        .option("checkpointLocation", f"{CHECKPOINTS}/p4")
+        .trigger(availableNow=True)
+        .toTable(f"{FQ}.p4_providers"))
+    q.awaitTermination()
+
+load_p4()
+p4_lines = ["provider_id,provider_name,specialty,npi,network"]
+p4_lines += [f"{i},Dr Provider {i},General,10000000{i},IN" for i in range(11, 16)]
+dbutils.fs.put(f"{PROVIDERS_DIR}/providers_002.csv", "\n".join(p4_lines) + "\n", overwrite=True)
+load_p4()
+# <<< END P4
 
 # COMMAND ----------
 
@@ -986,34 +1069,13 @@ except Exception as e:
 # MAGIC
 # MAGIC ### Warm-up
 # MAGIC **W1 — schema evolution on append**
-# MAGIC ```python
-# MAGIC spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu1_claims")
-# MAGIC spark.sql("CREATE TABLE main.dbacademy_l03.wu1_claims (claim_id INT, amount DOUBLE)")
-# MAGIC spark.sql("INSERT INTO main.dbacademy_l03.wu1_claims VALUES (1, 100.0), (2, 200.0)")
-# MAGIC new_rows = spark.createDataFrame([(3, 300.0, "Medicare"), (4, 400.0, "Aetna")], "claim_id INT, amount DOUBLE, payer STRING")
-# MAGIC new_rows.write.mode("append").option("mergeSchema", "true").saveAsTable("main.dbacademy_l03.wu1_claims")
-# MAGIC ```
+# MAGIC {{solution:W1}}
 # MAGIC
 # MAGIC **W2 — CHECK constraint**
-# MAGIC ```python
-# MAGIC spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu2_claims")
-# MAGIC spark.sql("CREATE TABLE main.dbacademy_l03.wu2_claims (claim_id INT, amount DOUBLE)")
-# MAGIC spark.sql("ALTER TABLE main.dbacademy_l03.wu2_claims ADD CONSTRAINT positive_amount CHECK (amount > 0)")
-# MAGIC spark.sql("INSERT INTO main.dbacademy_l03.wu2_claims VALUES (1, 50.0)")
-# MAGIC try:
-# MAGIC     spark.sql("INSERT INTO main.dbacademy_l03.wu2_claims VALUES (2, -5.0)")
-# MAGIC except Exception as e:
-# MAGIC     print("rejected:", error_class(e))
-# MAGIC ```
+# MAGIC {{solution:W2}}
 # MAGIC
 # MAGIC **W3 — DEEP CLONE**
-# MAGIC ```python
-# MAGIC spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_clone")
-# MAGIC spark.sql("DROP TABLE IF EXISTS main.dbacademy_l03.wu3_src")
-# MAGIC spark.sql("CREATE TABLE main.dbacademy_l03.wu3_src AS SELECT CAST(id AS INT) AS id FROM range(1, 6)")
-# MAGIC spark.sql("CREATE TABLE main.dbacademy_l03.wu3_clone DEEP CLONE main.dbacademy_l03.wu3_src")
-# MAGIC spark.sql("DELETE FROM main.dbacademy_l03.wu3_clone WHERE id <= 2")
-# MAGIC ```
+# MAGIC {{solution:W3}}
 # MAGIC
 # MAGIC ### Check Your Understanding
 # MAGIC 1. The checkpoint is the memory of the stream: it lists the loaded files (and the schema, if `schemaLocation` points there). Without it, the stream is a new stream. It loads **every** file in the folder again, so the table gets duplicates (E4: run 2 added 0 rows only because the checkpoint existed).
@@ -1021,87 +1083,34 @@ except Exception as e:
 # MAGIC 3. `addNewColumns` adds the new column to the table, but the stream stops first and needs a restart with writer `mergeSchema` (E5): the dashboard gets the column, but data is late until the restart. `rescue` never stops and never changes the table: the dashboard always gets fresh data, but the new column is only inside `_rescued_data` until someone changes the schema (E6).
 # MAGIC
 # MAGIC ### P1
-# MAGIC ```python
-# MAGIC p1_query = (spark.readStream
-# MAGIC     .format("cloudFiles")                                   # 1: the Auto Loader source
-# MAGIC     .option("cloudFiles.format", "csv")                     # 2: the option that sets the file format
-# MAGIC     .option("header", "true")                               # the CSV files have a header row
-# MAGIC     .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p1")
-# MAGIC     .load(PROVIDERS_DIR)
-# MAGIC     .writeStream
-# MAGIC     .option("checkpointLocation", f"{CHECKPOINTS}/p1")
-# MAGIC     .trigger(availableNow=True)                             # 3: load everything new, then stop
-# MAGIC     .toTable(f"{FQ}.p1_providers"))
-# MAGIC p1_query.awaitTermination()
-# MAGIC ```
+# MAGIC {{solution:P1}}
 # MAGIC
 # MAGIC ### P2 (fixes: `FILEFORMAT = JSON`; no `'force' = 'true'`)
-# MAGIC ```python
-# MAGIC p2_sql = f"""
-# MAGIC     COPY INTO {FQ}.p2_claims
-# MAGIC     FROM '{CLAIMS_DIR}'
-# MAGIC     FILEFORMAT = JSON
-# MAGIC     PATTERN = 'claims_00[1-3].json'
-# MAGIC     COPY_OPTIONS ('mergeSchema' = 'true')
-# MAGIC """
-# MAGIC ```
+# MAGIC {{solution:P2}}
 # MAGIC
 # MAGIC ### P3
-# MAGIC ```python
-# MAGIC p3_query = (spark.readStream
-# MAGIC     .format("cloudFiles")
-# MAGIC     .option("cloudFiles.format", "json")
-# MAGIC     .option("cloudFiles.inferColumnTypes", "true")                              # numbers instead of strings
-# MAGIC     .option("cloudFiles.schemaHints", "claim_amount DOUBLE, service_date DATE") # fix two types
-# MAGIC     .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p3")
-# MAGIC     .load(CLAIMS_DIR)
-# MAGIC     .writeStream
-# MAGIC     .option("checkpointLocation", f"{CHECKPOINTS}/p3")
-# MAGIC     .trigger(availableNow=True)
-# MAGIC     .toTable(f"{FQ}.p3_claims"))
-# MAGIC p3_query.awaitTermination()
-# MAGIC ```
+# MAGIC {{solution:P3}}
 # MAGIC
 # MAGIC ### P4
-# MAGIC ```python
-# MAGIC def load_p4():
-# MAGIC     q = (spark.readStream
-# MAGIC         .format("cloudFiles")
-# MAGIC         .option("cloudFiles.format", "csv")
-# MAGIC         .option("header", "true")
-# MAGIC         .option("cloudFiles.schemaEvolutionMode", "rescue")       # never stop, never change the table
-# MAGIC         .option("cloudFiles.schemaLocation", f"{CHECKPOINTS}/p4")
-# MAGIC         .load(PROVIDERS_DIR)
-# MAGIC         .writeStream
-# MAGIC         .option("checkpointLocation", f"{CHECKPOINTS}/p4")
-# MAGIC         .trigger(availableNow=True)
-# MAGIC         .toTable(f"{FQ}.p4_providers"))
-# MAGIC     q.awaitTermination()
-# MAGIC
-# MAGIC load_p4()
-# MAGIC p4_lines = ["provider_id,provider_name,specialty,npi,network"]
-# MAGIC p4_lines += [f"{i},Dr Provider {i},General,10000000{i},IN" for i in range(11, 16)]
-# MAGIC dbutils.fs.put(f"{PROVIDERS_DIR}/providers_002.csv", "\n".join(p4_lines) + "\n", overwrite=True)
-# MAGIC load_p4()
-# MAGIC ```
+# MAGIC {{solution:P4}}
 # MAGIC
 # MAGIC ### Exam answers
 # MAGIC
-# MAGIC **Q1 → B.** Without `cloudFiles.inferColumnTypes`, Auto Loader infers all JSON columns as strings (E4: `claim_amount` = `string`). A wrong: needs `inferColumnTypes`. C wrong: no decimal inference here. D wrong: there is no "first file decides" rule.
+# MAGIC **Q1 → B.** Without `cloudFiles.inferColumnTypes`, Auto Loader infers all JSON columns as strings (E4: `claim_amount` = `{{E4.type_claim_amount}}`). A wrong: needs `inferColumnTypes`. C wrong: no decimal inference here. D wrong: there is no "first file decides" rule.
 # MAGIC
-# MAGIC **Q2 → B.** `COPY INTO` skips files it already loaded (E3: second run inserted 0 rows). A wrong: that is the behaviour with `force`. C wrong: it does not fail. D wrong: skipping is the default; `force` turns it **off**.
+# MAGIC **Q2 → B.** `COPY INTO` skips files it already loaded (E3: second run inserted {{E3.run2_inserted}} rows). A wrong: that is the behaviour with `force`. C wrong: it does not fail. D wrong: skipping is the default; `force` turns it **off**.
 # MAGIC
-# MAGIC **Q3 → B.** The source schema was already updated; the Delta table also needs permission to add the column (E5: run B `STREAM_FAILED, DELTA_METADATA_MISMATCH`, run C with `mergeSchema` added 20 rows). A wrong: `none` ignores new columns, it does not fix the table. C wrong: deleting the checkpoint reloads every file (duplicates). D wrong: types are not the problem.
+# MAGIC **Q3 → B.** The source schema was already updated; the Delta table also needs permission to add the column (E5: run B `{{E5.runB_errors}}`, run C with `mergeSchema` added {{E5.runC_added}} rows). A wrong: `none` ignores new columns, it does not fix the table. C wrong: deleting the checkpoint reloads every file (duplicates). D wrong: types are not the problem.
 # MAGIC
-# MAGIC **Q4 → B.** The schema location holds the `_schemas` folder (E5: files `0, 1`). A wrong: processed files are tracked in the checkpoint. C wrong: it is for every format without a given schema. D wrong: the writer still needs `checkpointLocation`.
+# MAGIC **Q4 → B.** The schema location holds the `_schemas` folder (E5: files `{{E5.schema_files}}`). A wrong: processed files are tracked in the checkpoint. C wrong: it is for every format without a given schema. D wrong: the writer still needs `checkpointLocation`.
 # MAGIC
-# MAGIC **Q5 → C.** E6: 3 NULL values and the original in `_rescued_data`, for example `{"claim_amount":"N/A","_file_path":"/Volumes/main/dbacademy_l03/data/landing/claims_json/claims_007.json"}`. A/B/D wrong: the stream continued and added all 10 rows of the file.
+# MAGIC **Q5 → C.** E6: {{E6.bad_amount_null}} NULL values and the original in `_rescued_data`, for example `{{E6.rescued_example}}`. A/B/D wrong: the stream continued and added all {{E6.typed_run2_added}} rows of the file.
 # MAGIC
 # MAGIC **Q6 → B.** Auto Loader for "files in the order of millions or more over time" (*Ingest data from cloud object storage*). A wrong: `COPY INTO` is for thousands of files. C wrong: `read_files` reads all files on every query. D wrong: a full reload every day.
 # MAGIC
-# MAGIC **Q7 → B.** `cloud_files_state` lists the files of the stream (E4: 5 files). A wrong: history shows operations, not file names. C wrong: lists the folder, not what was ingested. D wrong: unrelated.
+# MAGIC **Q7 → B.** `cloud_files_state` lists the files of the stream (E4: {{E4.state_files}} files). A wrong: history shows operations, not file names. C wrong: lists the folder, not what was ingested. D wrong: unrelated.
 # MAGIC
-# MAGIC **Q8 → B.** E2: 11 rows and columns `_c0, _c1, _c2, _c3`, type `string`. A wrong: needs `header` and type inference. C wrong: no error. D wrong: no type inference without `inferSchema`.
+# MAGIC **Q8 → B.** E2: {{E2.plain_rows}} rows and columns `{{E2.plain_columns}}`, type `{{E2.plain_type_first}}`. A wrong: needs `header` and type inference. C wrong: no error. D wrong: no type inference without `inferSchema`.
 
 # COMMAND ----------
 
@@ -1119,14 +1128,14 @@ print(f"Dropped {FQ} (tables, volume, files, checkpoints).")
 # MAGIC
 # MAGIC | Example | Key result |
 # MAGIC | --- | --- |
-# MAGIC | Setup | 3 JSON files, 300 claims (75 APPROVED), 10 providers |
-# MAGIC | E1 `read_files` JSON | 300 rows from 3 files; `claim_amount` double, `service_date` string; `_rescued_data` added |
-# MAGIC | E2 CSV | plain reader: 11 rows, `_c0, _c1, _c2, _c3`; `read_files` + header: 10 rows, `npi` int → with `schemaHints` string |
-# MAGIC | E3 `COPY INTO` | inserted 300 → 0 (rerun) → 50 (new file); table 350 rows |
-# MAGIC | E4 Auto Loader | added 350 → 0 → 25; all columns strings (`claim_amount` string); `cloud_files_state` 5 files |
-# MAGIC | E5 new column | A FAILED (`STREAM_FAILED, UNKNOWN_FIELD_EXCEPTION.NEW_FIELDS_IN_RECORD_WITH_FILE_PATH`), B FAILED (`STREAM_FAILED, DELTA_METADATA_MISMATCH`), C SUCCESS (+20); `_schemas` files 0, 1 |
-# MAGIC | E6 rescued data | 3 NULL amounts with `_rescued_data`; rescue mode: `plan_type` column = False, 10 rescued rows |
-# MAGIC | Practice | P1 10 rows · P2 300 rows · P3 415 rows, 3 NULL amounts · P4 15 rows, 5 rescued |
+# MAGIC | Setup | {{setup.claim_files}} JSON files, {{setup.claim_rows}} claims ({{setup.approved}} APPROVED), {{setup.provider_rows}} providers |
+# MAGIC | E1 `read_files` JSON | {{E1.rows}} rows from {{E1.files}} files; `claim_amount` {{E1.type_claim_amount}}, `service_date` {{E1.type_service_date}}; `_rescued_data` added |
+# MAGIC | E2 CSV | plain reader: {{E2.plain_rows}} rows, `{{E2.plain_columns}}`; `read_files` + header: {{E2.rf_rows}} rows, `npi` {{E2.rf_type_npi}} → with `schemaHints` {{E2.hint_type_npi}} |
+# MAGIC | E3 `COPY INTO` | inserted {{E3.run1_inserted}} → {{E3.run2_inserted}} (rerun) → {{E3.run3_inserted}} (new file); table {{E3.after_run3}} rows |
+# MAGIC | E4 Auto Loader | added {{E4.run1_added}} → {{E4.run2_added}} → {{E4.run3_added}}; all columns strings (`claim_amount` {{E4.type_claim_amount}}); `cloud_files_state` {{E4.state_files}} files |
+# MAGIC | E5 new column | A {{E5.runA_status}} (`{{E5.runA_errors}}`), B {{E5.runB_status}} (`{{E5.runB_errors}}`), C {{E5.runC_status}} (+{{E5.runC_added}}); `_schemas` files {{E5.schema_files}} |
+# MAGIC | E6 rescued data | {{E6.bad_amount_null}} NULL amounts with `_rescued_data`; rescue mode: `plan_type` column = {{E6.rescue_has_plan_type}}, {{E6.rescue_rows_with_rescued}} rescued rows |
+# MAGIC | Practice | P1 {{P1.rows}} rows · P2 {{P2.rows}} rows · P3 {{P3.rows}} rows, {{P3.null_amounts}} NULL amounts · P4 {{P4.rows}} rows, {{P4.rescued}} rescued |
 # MAGIC
 # MAGIC ### NOT VERIFIED — concept only
 # MAGIC * **File notification / file events mode** — needs a cloud storage location with file events; this workspace has only volumes.
@@ -1135,7 +1144,7 @@ print(f"Dropped {FQ} (tables, volume, files, checkpoints).")
 # MAGIC * **`addNewColumnsWithTypeWidening` and `failOnNewColumns`** — described from the docs only.
 # MAGIC
 # MAGIC ### Surprises compared with the first expectation
-# MAGIC 1. `read_files` infers numbers, but kept `service_date` as `string`, not `DATE` (E1).
-# MAGIC 2. The docs say a restart continues with the new schema. That is true for the **source**: the restart with unchanged code still failed with `STREAM_FAILED, DELTA_METADATA_MISMATCH`, because the Delta **writer** needs `mergeSchema` (E5).
+# MAGIC 1. `read_files` infers numbers, but kept `service_date` as `{{E1.type_service_date}}`, not `DATE` (E1).
+# MAGIC 2. The docs say a restart continues with the new schema. That is true for the **source**: the restart with unchanged code still failed with `{{E5.runB_errors}}`, because the Delta **writer** needs `mergeSchema` (E5).
 # MAGIC 3. A failing stream fails the notebook cell even inside `try/except` (`Some streams terminated before this command could finish!`, test run 771734934782354). This is why E5 uses a companion notebook.
-# MAGIC 4. `read_files` inferred the 10-digit NPI as `int`: it fits, but an identifier should be a string (E2).
+# MAGIC 4. `read_files` inferred the 10-digit NPI as `{{E2.rf_type_npi}}`: it fits, but an identifier should be a string (E2).

@@ -9,14 +9,14 @@ old name once.
 
 ## Evidence-only rule (most important)
 - No guesses. Every number, output, error class and behaviour claim in markdown comes from a real
-  run (runs/LNN_latest.json) or an official Databricks doc page (name the page).
+  run (_authoring/LNN.json) or an official Databricks doc page (name the page).
 - Numbers in Explained cells are ALWAYS placeholders {{key}} filled by the build from METRICS.
   Never type a result number by hand.
 - Expected errors: catch with try/except, store the real error class in METRICS
   (e.g. METRICS["E2.error"] = "DELTA_FAILED_TO_MERGE_FIELDS") and reference it with a placeholder.
 - Things that cannot be verified here: "NOT VERIFIED — concept only (reason)", listed in the summary.
 - Check current syntax in the docs before writing it.
-- After a run, read runs/LNN_latest.json and make sure every Explained text matches the real
+- After a run, read _authoring/LNN.json and make sure every Explained text matches the real
   values (e.g. do not say "fails" if the metric shows it succeeded).
 
 ## Notebook rules
@@ -50,9 +50,9 @@ and set PRACTICE_PASSED · 10 Exam questions (8, healthcare scenarios, A–D) ·
 NOT VERIFIED list, surprises).
 
 ## Workflow per lesson
-1. Read lessons/specs/LNN.md and the previous lesson (for the warm-up).
-2. Write lessons/src/LNN.py in stages: setup → examples → rest. After each stage:
+1. Read _authoring/LNN.md and the previous lesson (for the warm-up).
+2. Write _authoring/LNN.py in stages: setup → examples → rest. After each stage:
    build solved → run → read results → fix. Do not continue on a failed run.
 3. Final: run with --twice; all asserts pass and METRICS are identical except "nd." keys.
-4. Build learner and publish. Commit src, notebook, spec and runs/LNN_latest.json.
+4. Build learner and publish. Commit _authoring/LNN.* and the notebooks in "Databricks - Learning/".
 5. Report: final METRICS, NOT VERIFIED items, surprises, and suggested PR title + description.
