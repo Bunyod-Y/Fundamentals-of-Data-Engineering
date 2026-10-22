@@ -7,7 +7,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | --- | --- | --- |
 | L01 | Lakehouse Basics | LEGACY DONE (.ipynb, in git) |
 | L02 | Delta Lake Deep Dive | LEGACY DONE (.ipynb, exported from the workspace into git 2026-10-22) |
-| L03 | Spark SQL Transformations | PLANNED |
+| L03 | Spark SQL Transformations | DONE 2026-10-22 |
 | L04 | PySpark DataFrame API, transforms, UDFs | PLANNED |
 | L05 | Semi-structured data: JSON, nested types, VARIANT | PLANNED |
 | L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-21 (built as "L03", renumbered 2026-10-22; see note) |
@@ -40,3 +40,10 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 
 (Add one line per lesson after it is finished: what behaved differently from the first expectation,
 and what the next lesson should know.)
+
+- L03: pre-test new example/practice cells with Databricks Connect (.venv, `serverless(True)`) against the
+  tables a failed run leaves behind; it saves full 3-5 minute job runs. Do not assert counts that depend on
+  random coverage (E9 first assumed NULLs only in `tsh`; some patients also lacked A1C/LDL).
+- L03: `approx_count_distinct` was not exact even at ~190 distinct values; ORDER BY without a frame behaved like
+  RANGE (the docs page does not state the default). L04 can reuse the L03 tables and queries for its PySpark versions.
+- L03 and L06 both use the schema `main.dbacademy_l03` until L06 is renumbered: running one lesson drops the other's tables.

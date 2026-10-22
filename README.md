@@ -44,6 +44,7 @@ Fundamentals-of-Data-Engineering/
 | L01 - Lakehouse Basics | Unity Catalog namespace, notebooks, compute, Delta tables, DML, MERGE, history, time travel, RESTORE, UNDROP |
 | L01 - Practical Purposes | quick navigation queries (SHOW / USE) |
 | L02 - Delta Lake Deep Dive | schema evolution, constraints, generated/identity columns, managed vs external, CLONE, maintenance |
+| L03 - Spark SQL Transformations | joins incl. SEMI/ANTI/CROSS, NULL keys and `<=>`, the `NOT IN` + NULL trap, `QUALIFY` dedup, `LAG`/`LEAD`, window frames and ties, ranking functions, `ROLLUP`/`CUBE`/`GROUPING SETS`, `PIVOT`/`UNPIVOT`, higher-order functions, set operators, `FILTER` vs `CASE` |
 | L06 - Ingestion with Auto Loader, read_files and COPY INTO | read_files, COPY INTO idempotency, Auto Loader, schema evolution, rescued data, `cloud_files_state` |
 | L11 - Structured Streaming Fundamentals | readStream/writeStream, triggers, output modes, watermarks, foreachBatch, checkpoints, deduplication |
 
@@ -115,7 +116,7 @@ serverless, and every number in the text comes from that run.
 ## 📈 Learning Path
 
 22 lessons are planned (`_authoring/CURRICULUM.md`, progress in `_authoring/PROGRESS.md`).
-Numbers follow the plan, so the notebooks that exist today are L01, L02, L06 and L11.
+Numbers follow the plan, so the notebooks that exist today are L01, L02, L03, L06 and L11.
 
 ```
 L01 Lakehouse Basics → L02 Delta Lake Deep Dive → L03 Spark SQL → L04 PySpark → L05 JSON/VARIANT
