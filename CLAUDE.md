@@ -79,6 +79,12 @@ old name once.
   `main.information_schema.routines`); `groupBy("name")` on a column made by a UC SQL function fails with
   CANNOT_RESOLVE_DATAFRAME_COLUMN (`groupBy(F.col("name"))` works); Python/Pandas UDFs fail through local
   Databricks Connect (sandbox startup), so test them only in job runs.
+- Verified (L05, 2026-10-22): ANSI mode is on, so `arr[i]` out of bounds (also `filter(...)[0]` on an empty
+  array) fails with INVALID_ARRAY_INDEX — use `get(arr, i)` / `try_element_at`; counting rows that use only
+  `_corrupt_record` from JSON files fails with UNSUPPORTED_FEATURE.QUERY_ONLY_CORRUPT_RECORD_COLUMN and the
+  usual `cache()` fix is unavailable (select another column or save a table); VARIANT cannot be a CLUSTER BY
+  key (DELTA_CLUSTERING_COLUMNS_DATATYPE_NOT_SUPPORTED); the 3.5.0 job client still has `F.parse_json` and
+  collects VARIANT values as VariantVal.
 - Workspace limits: the public DBFS root is disabled (use /Volumes only); no storage credential or
   external location of our own (external tables, s3://, abfss://, gs:// sources, file-notification
   mode are NOT VERIFIED — concept only).

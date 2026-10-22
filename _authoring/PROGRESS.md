@@ -9,7 +9,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | L02 | Delta Lake Deep Dive | LEGACY DONE (.ipynb, exported from the workspace into git 2026-10-22) |
 | L03 | Spark SQL Transformations | DONE 2026-10-22 |
 | L04 | PySpark DataFrame API, transforms, UDFs | DONE 2026-10-22 |
-| L05 | Semi-structured data: JSON, nested types, VARIANT | PLANNED |
+| L05 | Semi-structured data: JSON, nested types, VARIANT | DONE 2026-10-22 |
 | L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-21 (built as "L03", renumbered 2026-10-22; see note) |
 | L07 | Lakeflow Declarative Pipelines I | PLANNED |
 | L08 | LDP II: AUTO CDC, SCD 1/2 | PLANNED |
@@ -50,4 +50,9 @@ and what the next lesson should know.)
   so stage (a) used a temporary probe cell (METRICS["probe.*"], removed later) to learn UDF and cache behaviour in a real job.
 - L04: the job notebook client is PySpark 3.5.0 / Python 3.11 and behaves differently from Databricks Connect 18.3 on the
   laptop (`df.cache()` and `groupBy("name")` after a UC SQL function worked locally, failed in the job). Only job runs are evidence.
+- L05: a local Databricks Connect harness that execs the solved build's code cells (display stubbed) caught most problems
+  before the first job run; job runs were only needed for client-specific facts. The job client is PySpark 3.5.0 but has
+  `F.parse_json` and returns VARIANT values (VariantVal) — still prefer SQL expressions for VARIANT and cast before display.
+- L05: "bad record" depends on the parser: the JSON reader/colon/`from_json` accept single-quoted JSON, `parse_json` does not;
+  `from_json` puts a type mismatch into `_corrupt_record` too. One `schema_of_json` sample gave BIGINT and lost decimals.
 - L03 and L06 both use the schema `main.dbacademy_l03` until L06 is renumbered: running one lesson drops the other's tables.
