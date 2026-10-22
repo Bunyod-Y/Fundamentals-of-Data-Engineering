@@ -71,6 +71,14 @@ old name once.
   with the same code fails with DELTA_METADATA_MISMATCH until the writer has mergeSchema; Auto
   Loader infers all JSON/CSV columns as strings without cloudFiles.inferColumnTypes; COPY INTO
   returns num_affected_rows, num_inserted_rows, num_skipped_corrupt_files.
+- Verified (L04, 2026-10-22): serverless job notebooks run the PySpark client 3.5.0 on Python 3.11;
+  `df.cache()`/`persist()` fail with CACHE_REQUIRES_NEWER_CLIENT_ON_SERVERLESS_GC, `CACHE TABLE` and
+  `spark.catalog.cacheTable` with NOT_SUPPORTED_WITH_SERVERLESS; `spark.sql.execution.pythonUDF.arrow.enabled`
+  is false; a Python UDF whose value does not fit its returnType gives NULL without an error;
+  `SHOW USER FUNCTIONS IN main.<schema>` fails with CROSS_CATALOG_SCHEMA_REFERENCE_NOT_SUPPORTED (query
+  `main.information_schema.routines`); `groupBy("name")` on a column made by a UC SQL function fails with
+  CANNOT_RESOLVE_DATAFRAME_COLUMN (`groupBy(F.col("name"))` works); Python/Pandas UDFs fail through local
+  Databricks Connect (sandbox startup), so test them only in job runs.
 - Workspace limits: the public DBFS root is disabled (use /Volumes only); no storage credential or
   external location of our own (external tables, s3://, abfss://, gs:// sources, file-notification
   mode are NOT VERIFIED — concept only).

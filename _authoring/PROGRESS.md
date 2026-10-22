@@ -8,7 +8,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | L01 | Lakehouse Basics | LEGACY DONE (.ipynb, in git) |
 | L02 | Delta Lake Deep Dive | LEGACY DONE (.ipynb, exported from the workspace into git 2026-10-22) |
 | L03 | Spark SQL Transformations | DONE 2026-10-22 |
-| L04 | PySpark DataFrame API, transforms, UDFs | PLANNED |
+| L04 | PySpark DataFrame API, transforms, UDFs | DONE 2026-10-22 |
 | L05 | Semi-structured data: JSON, nested types, VARIANT | PLANNED |
 | L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-21 (built as "L03", renumbered 2026-10-22; see note) |
 | L07 | Lakeflow Declarative Pipelines I | PLANNED |
@@ -46,4 +46,8 @@ and what the next lesson should know.)
   random coverage (E9 first assumed NULLs only in `tsh`; some patients also lacked A1C/LDL).
 - L03: `approx_count_distinct` was not exact even at ~190 distinct values; ORDER BY without a frame behaved like
   RANGE (the docs page does not state the default). L04 can reuse the L03 tables and queries for its PySpark versions.
+- L04: Python and Pandas UDFs cannot run through local Databricks Connect (ISOLATION_STARTUP_FAILURE.SANDBOX_STARTUP),
+  so stage (a) used a temporary probe cell (METRICS["probe.*"], removed later) to learn UDF and cache behaviour in a real job.
+- L04: the job notebook client is PySpark 3.5.0 / Python 3.11 and behaves differently from Databricks Connect 18.3 on the
+  laptop (`df.cache()` and `groupBy("name")` after a UC SQL function worked locally, failed in the job). Only job runs are evidence.
 - L03 and L06 both use the schema `main.dbacademy_l03` until L06 is renumbered: running one lesson drops the other's tables.
