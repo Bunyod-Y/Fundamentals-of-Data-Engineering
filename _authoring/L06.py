@@ -5,7 +5,7 @@
 
 # DBTITLE 1,1 — Title
 # MAGIC %md
-# MAGIC # L03 — Ingestion with Auto Loader, read_files and COPY INTO
+# MAGIC # L06 — Ingestion with Auto Loader, read_files and COPY INTO
 # MAGIC
 # MAGIC **Exam objectives** (quoted from the official exam guides):
 # MAGIC
@@ -721,7 +721,7 @@ assert run_c_added == 20
 # MAGIC * **Run B** shows something the docs page does not say directly: a restart with the same code fails again, now with `DELTA_METADATA_MISMATCH`. The **source** schema has the new column, but the **Delta table** does not, and the writer may not add columns.
 # MAGIC * **Run C** added `.option("mergeSchema", "true")` on the **writer**. Now the table has the columns `{{E5.columns}}`. `payer` is filled for {{E5.payer_filled}} rows (the new file only); older rows have NULL. Total rows: {{E5.total}}.
 # MAGIC
-# MAGIC > **Key takeaway:** for `addNewColumns`, plan the restart (a job that restarts the task) **and** set `mergeSchema` on the writer. Otherwise the restart fails too. `try/except` around the stream does not help: in a test run of this lesson the cell still failed with `Some streams terminated before this command could finish!` (run 771734934782354, see `_authoring/L03.md`).
+# MAGIC > **Key takeaway:** for `addNewColumns`, plan the restart (a job that restarts the task) **and** set `mergeSchema` on the writer. Otherwise the restart fails too. `try/except` around the stream does not help: in a test run of this lesson the cell still failed with `Some streams terminated before this command could finish!` (run 771734934782354, see `_authoring/L06.md`).
 
 # COMMAND ----------
 
@@ -818,7 +818,7 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC | 10 | "A wrong type (`"N/A"` in a number column) fails the stream or drops the row." | The value becomes NULL and the original value is saved in `_rescued_data` with the file path (E6). |
 # MAGIC | 11 | "The checkpoint folder alone is enough for schema inference." | Schema inference and evolution need `cloudFiles.schemaLocation` (Auto Loader schema docs). |
 # MAGIC | 12 | "`spark.read.csv(path)` uses the header row." | Not without `header`: you get `_c0, _c1, …` and the header as a data row (E2). |
-# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `_authoring/L03.md`). Restart the stream instead: a job that restarts the task, or run the cell again (E5). |
+# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `_authoring/L06.md`). Restart the stream instead: a job that restarts the task, or run the cell again (E5). |
 # MAGIC | 14 | "Auto Loader uses file notification mode by default." | The default is directory listing mode (*What is Auto Loader?*). |
 # MAGIC | 15 | "`DESCRIBE HISTORY` of the target lists the loaded files." | Use `cloud_files_state('<checkpoint>')` (E4). |
 

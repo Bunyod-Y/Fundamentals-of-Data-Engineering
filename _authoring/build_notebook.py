@@ -54,7 +54,7 @@ PRACTICE_PASSED = {{}}
 
 def run_expecting_failure(key, code):
     \"\"\"Run code that must fail in the harness notebook; return its error classes ("none" if it did not fail).\"\"\"
-    error_file = "/Volumes/main/dbacademy_{lesson}/data/_expect_failure/" + key + ".json"
+    error_file = VOL + "/_expect_failure/" + key + ".json"   # VOL is defined by the lesson setup
     try:
         dbutils.notebook.run("./{harness}", 900, {{"code": code, "error_file": error_file}})
     except Exception:
