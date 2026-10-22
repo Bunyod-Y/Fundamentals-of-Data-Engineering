@@ -2,13 +2,5 @@
 .venv-1/
 __pycache__/
 
-# Solved notebooks for test runs
-build/
-
-# Run results: only the latest successful run per lesson is committed
-runs/*
-!runs/*_latest.json
-!runs/.gitkeep
-
-# Test builds imported into the workspace Git folder
-Databricks - Learning/_build/
+# Solved builds and run history (_authoring/LNN.json keeps the verified run)
+_authoring/build/

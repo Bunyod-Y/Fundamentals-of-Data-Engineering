@@ -1,12 +1,12 @@
 """Run a lesson's solved notebook on serverless and save the results.
 
-    python tools/run_lesson.py L02             build solved, import, run once
-    python tools/run_lesson.py L02 --twice     run twice and diff METRICS (keys starting with "nd." are ignored)
-    python tools/run_lesson.py L02 --publish   build the learner notebook and import it (no run)
+    python _authoring/run_lesson.py L02             build solved, import, run once
+    python _authoring/run_lesson.py L02 --twice     run twice and diff METRICS (keys starting with "nd." are ignored)
+    python _authoring/run_lesson.py L02 --publish   build the learner notebooks into "Databricks - Learning/" (no run)
 
-Results: runs/LNN_<UTC timestamp>.json for every run; runs/LNN_latest.json only after a successful run.
-Workspace: <home>/Fundamentals-of-Data-Engineering/Databricks - Learning (a Git folder),
-test builds in its _build/ subfolder. <home> comes from `databricks current-user me`.
+Results: _authoring/build/runs/LNN_<UTC timestamp>.json for every run; _authoring/LNN.json only after a successful run.
+Test builds are imported to <home>/_lesson_build, outside the Git folder (<home> from `databricks current-user me`).
+Learner notebooks reach the workspace through git: commit, push, then Pull in the workspace Git folder.
 """
 import argparse
 import json
@@ -22,8 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_notebook  # noqa: E402
 
 ROOT = build_notebook.ROOT
-LESSON_DIR = "Fundamentals-of-Data-Engineering/Databricks - Learning"  # relative to the user's home
-BUILD_SUBDIR = "_build"
+BUILD_DIR = "_lesson_build"          # workspace folder for test builds, relative to the user's home
 POLL_SECONDS = 15
 RUN_TIMEOUT_SECONDS = 3600
 TERMINAL_STATES = {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}  # a failed notebook ends in INTERNAL_ERROR
@@ -45,9 +44,8 @@ class Cli:
         return json.loads(r.stdout) if parse and r.stdout.strip() else r.stdout
 
 
-def lesson_dir(cli):
-    home = f"/Users/{cli('current-user', 'me')['userName']}"
-    return f"{home}/{LESSON_DIR}"
+def build_dir(cli):
+    return f"/Users/{cli('current-user', 'me')['userName']}/{BUILD_DIR}"
 
 
 def import_notebook(cli, local_path, workspace_path):
@@ -108,14 +106,14 @@ def run_once(cli, lesson, notebook_path, code_hash):
             record[k] = ANSI_RE.sub("", output[k])  # the notebook trace comes with terminal colour codes
 
     ok = record["result_state"] == "SUCCESS" and isinstance(record["metrics"], dict)
-    runs = ROOT / "runs"
-    runs.mkdir(exist_ok=True)
+    runs = build_notebook.BUILD / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
     out = runs / f"{lesson}_{started:%Y%m%dT%H%M%SZ}.json"
     out.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8", newline="\n")
     if ok:
-        shutil.copyfile(out, runs / f"{lesson}_latest.json")
+        shutil.copyfile(out, build_notebook.LESSONS / f"{lesson}.json")
     print(f"{'SUCCESS' if ok else 'FAILED'}: {record['result_state']} in {record['run_duration_s']} s -> "
-          f"{out.relative_to(ROOT)}{' (and ' + lesson + '_latest.json)' if ok else ''}")
+          f"{out.relative_to(ROOT)}{' (and _authoring/' + lesson + '.json)' if ok else ''}")
     if not ok:
         print(record.get("state_message") or "")
         print(record.get("error") or "")
@@ -132,29 +130,33 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("lesson", help="lesson id, e.g. L02")
     p.add_argument("--twice", action="store_true", help="run two times and diff METRICS")
-    p.add_argument("--publish", action="store_true", help="build the learner notebook and import it (no run)")
+    p.add_argument("--publish", action="store_true",
+                   help='build the learner notebooks into "Databricks - Learning/" (no run)')
     p.add_argument("--profile", default="DEFAULT", help="Databricks CLI profile (default: DEFAULT)")
     args = p.parse_args()
+
+    if args.publish:
+        try:
+            path, _ = build_notebook.build(args.lesson, "learner")
+            built = [path] + [c for c, _ in build_notebook.build_companions(args.lesson, "learner")]
+        except build_notebook.BuildError as e:
+            sys.exit(f"FAILED: {e}")
+        for p_ in built:
+            print(f"built {p_.relative_to(ROOT)}")
+        print("Next: commit and push, then Pull in the workspace Git folder.")
+        return
+
     cli = Cli(args.profile)
-
     try:
-        target = lesson_dir(cli)
-        if args.publish:
-            path, title = build_notebook.build(args.lesson, "learner")
-            print(f"built {path.relative_to(ROOT)}")
-            import_notebook(cli, path, f"{target}/{args.lesson} - {title}")
-            for comp_path, comp_title in build_notebook.build_companions(args.lesson, "learner"):
-                import_notebook(cli, comp_path, f"{target}/{comp_title}")
-            return
-
+        target = build_dir(cli)
         path, _ = build_notebook.build(args.lesson, "solved")
         print(f"built {path.relative_to(ROOT)}")
         code_hash = build_notebook.lesson_code_hash(args.lesson)
-        notebook = f"{target}/{BUILD_SUBDIR}/{args.lesson}_solved"
+        notebook = f"{target}/{args.lesson}_solved"
         import_notebook(cli, path, notebook)
         # Companions sit next to the lesson notebook, so dbutils.notebook.run("./<title>") finds them
         for comp_path, comp_title in build_notebook.build_companions(args.lesson, "solved"):
-            import_notebook(cli, comp_path, f"{target}/{BUILD_SUBDIR}/{comp_title}")
+            import_notebook(cli, comp_path, f"{target}/{comp_title}")
 
         results = []
         for i in range(2 if args.twice else 1):
