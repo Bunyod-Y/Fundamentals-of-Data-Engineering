@@ -45,7 +45,6 @@ Fundamentals-of-Data-Engineering/
 | L01 - Practical Purposes | quick navigation queries (SHOW / USE) |
 | L02 - Delta Lake Deep Dive | schema evolution, constraints, generated/identity columns, managed vs external, CLONE, maintenance |
 | L03 - Ingestion with Auto Loader, read_files and COPY INTO | read_files, COPY INTO idempotency, Auto Loader, schema evolution, rescued data, `cloud_files_state` |
-| L03 - Bronze Ingestion | helper notebook that L03 runs with `dbutils.notebook.run` (do not run it by hand) |
 | L04 - Structured Streaming Fundamentals | readStream/writeStream, triggers, output modes, watermarks, foreachBatch, checkpoints, deduplication |
 
 New lessons (L03 and later) are tested before they are published: the solved version runs twice on

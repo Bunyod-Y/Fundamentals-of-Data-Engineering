@@ -80,8 +80,9 @@ try:
     t = spark.table("main.dbacademy_l03.wu1_claims")
     cols, rows = t.columns, t.count()
     null_payers = t.filter("payer IS NULL").count() if "payer" in cols else None
-    WARMUP_PASSED["W1"] = cols == ["claim_id", "amount", "payer"] and rows == 4 and null_payers == 2
-    print("✅ Passed" if WARMUP_PASSED["W1"] else
+    ok = cols == ["claim_id", "amount", "payer"] and rows == 4 and null_payers == 2
+    WARMUP_PASSED["W1"] = ok
+    print("✅ Passed" if ok else
           f"Hint: want columns [claim_id, amount, payer], 4 rows, 2 NULL payers; got {cols}, {rows} rows, {null_payers} NULL payers. "
           "An append with a new column needs option('mergeSchema', 'true').")
 except Exception as e:
@@ -119,8 +120,9 @@ try:
     rows = spark.table("main.dbacademy_l03.wu2_claims").count()
     props = {r["key"]: r["value"] for r in spark.sql("SHOW TBLPROPERTIES main.dbacademy_l03.wu2_claims").collect()}
     has_check = "delta.constraints.positive_amount" in props
-    WARMUP_PASSED["W2"] = rows == 1 and has_check
-    print("✅ Passed" if WARMUP_PASSED["W2"] else
+    ok = rows == 1 and has_check
+    WARMUP_PASSED["W2"] = ok
+    print("✅ Passed" if ok else
           f"Hint: want 1 row and a constraint named positive_amount; got {rows} rows, constraint present = {has_check}.")
 except Exception as e:
     WARMUP_PASSED["W2"] = False
@@ -155,8 +157,9 @@ try:
     clone = spark.table("main.dbacademy_l03.wu3_clone").count()
     first_op = (spark.sql("DESCRIBE HISTORY main.dbacademy_l03.wu3_clone")
                 .orderBy("version").first()["operation"])
-    WARMUP_PASSED["W3"] = src == 5 and clone == 3 and first_op == "CLONE"
-    print("✅ Passed" if WARMUP_PASSED["W3"] else
+    ok = src == 5 and clone == 3 and first_op == "CLONE"
+    WARMUP_PASSED["W3"] = ok
+    print("✅ Passed" if ok else
           f"Hint: want source 5 rows, clone 3 rows, first clone operation CLONE; got {src}, {clone}, {first_op}.")
 except Exception as e:
     WARMUP_PASSED["W3"] = False
@@ -414,14 +417,16 @@ per_file = spark.sql(f"""
 display(per_file)                                              # rows per file
 
 types = dict(e1.dtypes)                                        # {column: type}
-METRICS["E1.rows"] = e1.count()
+rows, files = e1.count(), per_file.count()
+print(f"{rows} rows from {files} files; claim_amount = {types['claim_amount']}, service_date = {types['service_date']}")
+METRICS["E1.rows"] = rows
 METRICS["E1.columns"] = ", ".join(e1.columns)
 METRICS["E1.type_claim_id"] = types["claim_id"]
 METRICS["E1.type_claim_amount"] = types["claim_amount"]
 METRICS["E1.type_service_date"] = types["service_date"]
-METRICS["E1.files"] = per_file.count()
+METRICS["E1.files"] = files
 METRICS["E1.rows_per_file"] = ", ".join(str(r["row_count"]) for r in per_file.collect())
-assert METRICS["E1.rows"] == 300 and METRICS["E1.files"] == 3
+assert rows == 300 and files == 3
 
 # COMMAND ----------
 
@@ -459,7 +464,8 @@ METRICS["E2.plain_type_first"] = plain.dtypes[0][1]           # type of the firs
 rf_query = f"SELECT * FROM read_files('{PROVIDERS_DIR}', format => 'csv', header => true)"
 rf = spark.sql(rf_query)                                       # header row gives the column names
 display(spark.sql(f"DESCRIBE QUERY {rf_query}"))               # inferred types
-METRICS["E2.rf_rows"] = rf.count()
+rf_rows = rf.count()
+METRICS["E2.rf_rows"] = rf_rows
 METRICS["E2.rf_type_provider_id"] = dict(rf.dtypes)["provider_id"]
 METRICS["E2.rf_type_npi"] = dict(rf.dtypes)["npi"]
 
@@ -470,7 +476,7 @@ hinted = spark.sql(f"""
 display(hinted)
 METRICS["E2.hint_type_npi"] = dict(hinted.dtypes)["npi"]
 METRICS["E2.hint_type_provider_id"] = dict(hinted.dtypes)["provider_id"]
-assert METRICS["E2.rf_rows"] == 10
+assert rf_rows == 10
 
 # COMMAND ----------
 
@@ -510,21 +516,23 @@ r1 = spark.sql(copy_sql)                                       # run 1: all 3 fi
 display(r1)                                                    # COPY INTO returns a small result table
 METRICS["E3.result_columns"] = ", ".join(r1.columns)
 METRICS["E3.run1_inserted"] = r1.first()["num_inserted_rows"]
-METRICS["E3.after_run1"] = spark.table(f"{FQ}.claims_copy").count()
+after_run1 = spark.table(f"{FQ}.claims_copy").count()
 
 r2 = spark.sql(copy_sql)                                       # run 2: same files again
 display(r2)
 METRICS["E3.run2_inserted"] = r2.first()["num_inserted_rows"]
-METRICS["E3.after_run2"] = spark.table(f"{FQ}.claims_copy").count()
+after_run2 = spark.table(f"{FQ}.claims_copy").count()
 
 land_claims("claims_004.json", first_id=301, n=50)             # a new delivery arrives
 r3 = spark.sql(copy_sql)                                       # run 3: only the new file
 display(r3)
 METRICS["E3.run3_inserted"] = r3.first()["num_inserted_rows"]
-METRICS["E3.after_run3"] = spark.table(f"{FQ}.claims_copy").count()
+after_run3 = spark.table(f"{FQ}.claims_copy").count()
+print(f"table rows after each run: {after_run1}, {after_run2}, {after_run3}")
+METRICS["E3.after_run1"], METRICS["E3.after_run2"], METRICS["E3.after_run3"] = after_run1, after_run2, after_run3
 METRICS["E3.type_claim_amount"] = dict(spark.table(f"{FQ}.claims_copy").dtypes)["claim_amount"]
 display(spark.sql(f"DESCRIBE HISTORY {FQ}.claims_copy").select("version", "operation", "operationMetrics"))
-assert METRICS["E3.after_run1"] == 300 and METRICS["E3.after_run2"] == 300 and METRICS["E3.after_run3"] == 350
+assert after_run1 == 300 and after_run2 == 300 and after_run3 == 350
 
 # COMMAND ----------
 
@@ -576,13 +584,15 @@ def load_bronze():
     query.awaitTermination()                                   # wait until availableNow is done
     return table_count(BRONZE) - before
 
-METRICS["E4.run1_added"] = load_bronze()                       # first run: every file in the folder
-METRICS["E4.run2_added"] = load_bronze()                       # second run: no new files
+run1 = load_bronze()                                           # first run: every file in the folder
+run2 = load_bronze()                                           # second run: no new files
 land_claims("claims_005.json", first_id=351, n=25)             # a new delivery
-METRICS["E4.run3_added"] = load_bronze()                       # third run: only the new file
+run3 = load_bronze()                                           # third run: only the new file
+print(f"rows added: run 1 = {run1}, run 2 = {run2}, run 3 = {run3}")
+METRICS["E4.run1_added"], METRICS["E4.run2_added"], METRICS["E4.run3_added"] = run1, run2, run3
 METRICS["E4.total"] = table_count(BRONZE)
 
-bronze_types = dict(spark.table(BRONZE).dtypes)
+bronze_types = dict(spark.table(BRONZE).dtypes)                # {column: type}
 METRICS["E4.columns"] = ", ".join(spark.table(BRONZE).columns)
 METRICS["E4.type_claim_amount"] = bronze_types["claim_amount"]
 METRICS["E4.type_claim_id"] = bronze_types["claim_id"]
@@ -592,7 +602,7 @@ state = spark.sql(f"SELECT * FROM cloud_files_state('{BRONZE_CKPT}')")   # which
 display(state)
 METRICS["E4.state_files"] = state.count()
 METRICS["E4.state_columns"] = ", ".join(state.columns)
-assert METRICS["E4.run1_added"] == 350 and METRICS["E4.run2_added"] == 0 and METRICS["E4.run3_added"] == 25
+assert run1 == 350 and run2 == 0 and run3 == 25
 
 # COMMAND ----------
 
@@ -622,41 +632,78 @@ assert METRICS["E4.run1_added"] == 350 and METRICS["E4.run2_added"] == 0 and MET
 
 # COMMAND ----------
 
-# DBTITLE 1,E5 Code
-INGEST_NB = "./L03 - Bronze Ingestion"                         # companion notebook in the same folder
+# DBTITLE 1,E5 Code — a file with a new column arrives
+land_claims("claims_006.json", first_id=376, n=20, extra={"payer": "Medicare"})   # 20 claims with a new column payer
+e5_before = table_count(BRONZE)                                # bronze rows before the three runs
+print("bronze rows before run A:", e5_before)
 
-def run_ingest_notebook(run_name, merge_schema):
-    """Run the bronze ingestion notebook once, like one job run. Return (status, rows added, error classes)."""
-    error_file = f"{VOL}/_errors/{run_name}.json"               # the child writes its error classes here
-    params = {"source_dir": CLAIMS_DIR, "table": BRONZE, "checkpoint": BRONZE_CKPT,
-              "merge_schema": str(merge_schema).lower(), "error_file": error_file}
-    try:
-        result = json.loads(dbutils.notebook.run(INGEST_NB, 600, params))   # 600 s timeout
-        return "SUCCESS", result["rows_added"], ""
-    except Exception:                                           # the child run failed
-        err = json.loads(dbutils.fs.head(error_file))
-        return "FAILED", 0, ", ".join(err["error_classes"])
+# COMMAND ----------
 
-land_claims("claims_006.json", first_id=376, n=20, extra={"payer": "Medicare"})   # new column payer
+# DBTITLE 1,E5 Note — the next two cells fail on purpose
+# MAGIC %md
+# MAGIC **The next two cells are expected to fail.** Run each one, read the error class in the red message, then go on. In a job, the task would stop here: "Databricks recommends configuring Auto Loader streams with Lakeflow Jobs to restart automatically after such schema changes" (*Configure schema inference and evolution in Auto Loader*). In this notebook, **you** do the restart by running the next cell.
+# MAGIC
+# MAGIC Runs A and B write the full Auto Loader code again (the same as `load_bronze()` in E4), so you can see exactly what changes in run C.
 
-for run_name, merge in [("runA", False),                       # A: the stream sees the new column
-                        ("runB", False),                       # B: restart with the same code
-                        ("runC", True)]:                       # C: restart, writer allows new columns
-    status, added, errors = run_ingest_notebook(run_name, merge)
-    METRICS[f"E5.{run_name}_status"] = status
-    METRICS[f"E5.{run_name}_added"] = added
-    METRICS[f"E5.{run_name}_errors"] = errors or "none"
-    print(f"{run_name}: merge_schema={merge} -> {status}, rows added {added}, errors: {errors or 'none'}")
+# COMMAND ----------
 
-METRICS["E5.total"] = table_count(BRONZE)
-METRICS["E5.columns"] = ", ".join(spark.table(BRONZE).columns)
-METRICS["E5.payer_filled"] = spark.table(BRONZE).filter("payer IS NOT NULL").count()
+# DBTITLE 1,E5 Run A — the stream sees the new column
+# EXPECT_FAILURE: E5.runA
+(spark.readStream
+    .format("cloudFiles")                                                             # Auto Loader
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", "/Volumes/main/dbacademy_l03/data/_checkpoints/claims_bronze")
+    .load("/Volumes/main/dbacademy_l03/data/landing/claims_json")
+    .writeStream
+    .option("checkpointLocation", "/Volumes/main/dbacademy_l03/data/_checkpoints/claims_bronze")
+    .trigger(availableNow=True)
+    .toTable("main.dbacademy_l03.claims_bronze")
+    .awaitTermination())                                                              # wait for the result
+
+# COMMAND ----------
+
+# DBTITLE 1,E5 Run B — restart with exactly the same code
+# EXPECT_FAILURE: E5.runB
+(spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", "/Volumes/main/dbacademy_l03/data/_checkpoints/claims_bronze")
+    .load("/Volumes/main/dbacademy_l03/data/landing/claims_json")
+    .writeStream
+    .option("checkpointLocation", "/Volumes/main/dbacademy_l03/data/_checkpoints/claims_bronze")
+    .trigger(availableNow=True)
+    .toTable("main.dbacademy_l03.claims_bronze")
+    .awaitTermination())
+
+# COMMAND ----------
+
+# DBTITLE 1,E5 Run C — restart with mergeSchema on the writer
+(spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", "/Volumes/main/dbacademy_l03/data/_checkpoints/claims_bronze")
+    .load("/Volumes/main/dbacademy_l03/data/landing/claims_json")
+    .writeStream
+    .option("checkpointLocation", "/Volumes/main/dbacademy_l03/data/_checkpoints/claims_bronze")
+    .option("mergeSchema", "true")                                                    # the only change: the table may get new columns
+    .trigger(availableNow=True)
+    .toTable("main.dbacademy_l03.claims_bronze")
+    .awaitTermination())
+
+run_c_added = table_count(BRONZE) - e5_before                 # runs A and B added nothing
+payer_filled = spark.table(BRONZE).filter("payer IS NOT NULL").count()
+print(f"run C added {run_c_added} rows; payer filled in {payer_filled} rows")
 display(spark.table(BRONZE).filter("claim_id >= 370").orderBy("claim_id"))
 
-schema_files = sorted(f.name for f in dbutils.fs.ls(f"{BRONZE_CKPT}/_schemas"))
-METRICS["E5.schema_files"] = ", ".join(schema_files)
+schema_files = sorted(f.name for f in dbutils.fs.ls(f"{BRONZE_CKPT}/_schemas"))   # one file per schema version
 print("schema versions:", schema_files)
 print(dbutils.fs.head(f"{BRONZE_CKPT}/_schemas/{schema_files[-1]}", 1000))   # the latest stored schema
+METRICS["E5.runC_added"] = run_c_added
+METRICS["E5.total"] = table_count(BRONZE)
+METRICS["E5.columns"] = ", ".join(spark.table(BRONZE).columns)
+METRICS["E5.payer_filled"] = payer_filled
+METRICS["E5.schema_files"] = ", ".join(schema_files)
+assert run_c_added == 20
 
 # COMMAND ----------
 
@@ -664,19 +711,17 @@ print(dbutils.fs.head(f"{BRONZE_CKPT}/_schemas/{schema_files[-1]}", 1000))   # t
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC | Run | Writer `mergeSchema` | Status | Rows added | Error classes |
-# MAGIC | --- | --- | --- | --- | --- |
-# MAGIC | A | no | {{E5.runA_status}} | {{E5.runA_added}} | `{{E5.runA_errors}}` |
-# MAGIC | B (restart, same code) | no | {{E5.runB_status}} | {{E5.runB_added}} | `{{E5.runB_errors}}` |
-# MAGIC | C (restart) | yes | {{E5.runC_status}} | {{E5.runC_added}} | {{E5.runC_errors}} |
+# MAGIC | Run | Writer `mergeSchema` | Result | Error classes |
+# MAGIC | --- | --- | --- | --- |
+# MAGIC | A | no | failed | `{{E5.runA.errors}}` |
+# MAGIC | B (restart, same code) | no | failed again | `{{E5.runB.errors}}` |
+# MAGIC | C (restart) | yes | added {{E5.runC_added}} rows | — |
 # MAGIC
 # MAGIC * **Run A** stopped as the docs describe: the new column `payer` raised `UNKNOWN_FIELD_EXCEPTION` (wrapped in `STREAM_FAILED`). Before it stopped, Auto Loader saved a new schema version. The `_schemas` folder now holds the files `{{E5.schema_files}}`: version 0 from the first run and version 1 with `payer`.
 # MAGIC * **Run B** shows something the docs page does not say directly: a restart with the same code fails again, now with `DELTA_METADATA_MISMATCH`. The **source** schema has the new column, but the **Delta table** does not, and the writer may not add columns.
 # MAGIC * **Run C** added `.option("mergeSchema", "true")` on the **writer**. Now the table has the columns `{{E5.columns}}`. `payer` is filled for {{E5.payer_filled}} rows (the new file only); older rows have NULL. Total rows: {{E5.total}}.
 # MAGIC
-# MAGIC **Why a separate notebook?** In a test run of this lesson, `try/except` around the failing stream was not enough: the notebook cell still failed with `Some streams terminated before this command could finish!`, and this stopped the whole job (run 771734934782354, see `_authoring/L03.md`). A failed stream fails the cell, even if Python catches the exception. So E5 runs the stream in the companion notebook **`L03 - Bronze Ingestion`** with `dbutils.notebook.run`, like one run of a scheduled job. The caller catches the failed child run and restarts it.
-# MAGIC
-# MAGIC > **Key takeaway:** for `addNewColumns`, plan the restart (a job with retries, or a caller that restarts) **and** set `mergeSchema` on the writer. Otherwise the restart fails too.
+# MAGIC > **Key takeaway:** for `addNewColumns`, plan the restart (a job that restarts the task) **and** set `mergeSchema` on the writer. Otherwise the restart fails too. `try/except` around the stream does not help: in a test run of this lesson the cell still failed with `Some streams terminated before this command could finish!` (run 771734934782354, see `_authoring/L03.md`).
 
 # COMMAND ----------
 
@@ -710,10 +755,13 @@ def load_with(table, ckpt, **options):
     return table_count(table) - before
 
 # Part A: typed stream, then a file with bad amounts
-METRICS["E6.typed_run1_added"] = load_with(TYPED, TYPED_CKPT, inferColumnTypes="true")
+typed_run1 = load_with(TYPED, TYPED_CKPT, inferColumnTypes="true")
+METRICS["E6.typed_run1_added"] = typed_run1
 METRICS["E6.typed_type_claim_amount"] = dict(spark.table(TYPED).dtypes)["claim_amount"]
 land_claims("claims_007.json", first_id=396, n=10, bad_amount_ids=(396, 397, 398))   # 3 bad values
-METRICS["E6.typed_run2_added"] = load_with(TYPED, TYPED_CKPT, inferColumnTypes="true")
+typed_run2 = load_with(TYPED, TYPED_CKPT, inferColumnTypes="true")
+print(f"typed stream: run 1 added {typed_run1}, run 2 added {typed_run2}")
+METRICS["E6.typed_run2_added"] = typed_run2
 bad = spark.table(TYPED).filter("claim_id IN (396, 397, 398)").orderBy("claim_id")
 display(bad.select("claim_id", "claim_amount", "_rescued_data"))
 METRICS["E6.bad_amount_null"] = bad.filter("claim_amount IS NULL").count()
@@ -721,10 +769,13 @@ METRICS["E6.bad_rescued"] = bad.filter("_rescued_data IS NOT NULL").count()
 METRICS["E6.rescued_example"] = bad.first()["_rescued_data"]
 
 # Part B: rescue mode, then a file with a new column
-METRICS["E6.rescue_run1_added"] = load_with(RESCUE, RESCUE_CKPT, schemaEvolutionMode="rescue")
+rescue_run1 = load_with(RESCUE, RESCUE_CKPT, schemaEvolutionMode="rescue")
 land_claims("claims_008.json", first_id=406, n=10, extra={"plan_type": "HMO"})      # new column plan_type
-METRICS["E6.rescue_run2_added"] = load_with(RESCUE, RESCUE_CKPT, schemaEvolutionMode="rescue")
+rescue_run2 = load_with(RESCUE, RESCUE_CKPT, schemaEvolutionMode="rescue")
+print(f"rescue stream: run 1 added {rescue_run1}, run 2 added {rescue_run2}")
+METRICS["E6.rescue_run1_added"], METRICS["E6.rescue_run2_added"] = rescue_run1, rescue_run2
 rescue_cols = spark.table(RESCUE).columns
+print("columns of the rescue table:", rescue_cols)
 METRICS["E6.rescue_has_plan_type"] = "plan_type" in rescue_cols
 METRICS["E6.rescue_rows_with_rescued"] = spark.table(RESCUE).filter("_rescued_data IS NOT NULL").count()
 METRICS["E6.rescue_example"] = (spark.table(RESCUE).filter("claim_id = 406").first()["_rescued_data"])
@@ -767,7 +818,7 @@ display(spark.table(RESCUE).filter("claim_id >= 406").select("claim_id", "claim_
 # MAGIC | 10 | "A wrong type (`"N/A"` in a number column) fails the stream or drops the row." | The value becomes NULL and the original value is saved in `_rescued_data` with the file path (E6). |
 # MAGIC | 11 | "The checkpoint folder alone is enough for schema inference." | Schema inference and evolution need `cloudFiles.schemaLocation` (Auto Loader schema docs). |
 # MAGIC | 12 | "`spark.read.csv(path)` uses the header row." | Not without `header`: you get `_c0, _c1, …` and the header as a data row (E2). |
-# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `_authoring/L03.md`). Restart through a job or a caller notebook. |
+# MAGIC | 13 | "`try/except` around a failing stream keeps a notebook job alive." | The cell still failed with `Some streams terminated before this command could finish!` (test run in `_authoring/L03.md`). Restart the stream instead: a job that restarts the task, or run the cell again (E5). |
 # MAGIC | 14 | "Auto Loader uses file notification mode by default." | The default is directory listing mode (*What is Auto Loader?*). |
 # MAGIC | 15 | "`DESCRIBE HISTORY` of the target lists the loaded files." | Use `cloud_files_state('<checkpoint>')` (E4). |
 
@@ -864,8 +915,9 @@ p1_query.awaitTermination()
 try:
     t = spark.table(f"{FQ}.p1_providers")
     rows, cols = t.count(), t.columns
-    PRACTICE_PASSED["P1"] = rows == 10 and "provider_id" in cols
-    print("✅ Passed" if PRACTICE_PASSED["P1"] else
+    ok = rows == 10 and "provider_id" in cols
+    PRACTICE_PASSED["P1"] = ok
+    print("✅ Passed" if ok else
           f"Hint: want 10 rows and a provider_id column; got {rows} rows and columns {cols}. "
           "Did the header option reach the reader?")
 except Exception as e:
@@ -912,8 +964,9 @@ spark.sql(p2_sql)                                              # the retry
 try:
     t = spark.table(f"{FQ}.p2_claims")
     rows, cols = t.count(), t.columns
-    PRACTICE_PASSED["P2"] = rows == 300 and "claim_amount" in cols
-    if PRACTICE_PASSED["P2"]:
+    ok = rows == 300 and "claim_amount" in cols
+    PRACTICE_PASSED["P2"] = ok
+    if ok:
         print("✅ Passed")
     elif "claim_amount" not in cols:
         print(f"Hint: the columns are {cols}. Which FILEFORMAT do the claim files have?")
@@ -963,9 +1016,10 @@ try:
     expected = spark.read.text(CLAIMS_DIR).count()                # one claim per line in all landed files
     rows, types = t.count(), dict(t.dtypes)
     null_amounts = t.filter("claim_amount IS NULL").count()
-    PRACTICE_PASSED["P3"] = (rows == expected and types.get("claim_amount") == "double"
-                             and types.get("service_date") == "date" and null_amounts == 3)
-    print("✅ Passed" if PRACTICE_PASSED["P3"] else
+    ok = (rows == expected and types.get("claim_amount") == "double"
+          and types.get("service_date") == "date" and null_amounts == 3)
+    PRACTICE_PASSED["P3"] = ok
+    print("✅ Passed" if ok else
           f"Hint: want {expected} rows, claim_amount double, service_date date, 3 NULL amounts; got {rows} rows, "
           f"claim_amount {types.get('claim_amount')}, service_date {types.get('service_date')}, {null_amounts} NULL amounts.")
     METRICS["P3.rows"], METRICS["P3.null_amounts"] = rows, null_amounts
@@ -1018,8 +1072,9 @@ try:
     t = spark.table(f"{FQ}.p4_providers")
     rows, cols = t.count(), t.columns
     rescued = t.filter("_rescued_data LIKE '%network%'").count() if "_rescued_data" in cols else 0
-    PRACTICE_PASSED["P4"] = rows == 15 and "network" not in cols and rescued == 5
-    print("✅ Passed" if PRACTICE_PASSED["P4"] else
+    ok = rows == 15 and "network" not in cols and rescued == 5
+    PRACTICE_PASSED["P4"] = ok
+    print("✅ Passed" if ok else
           f"Hint: want 15 rows, no network column, 5 rows with network in _rescued_data; "
           f"got {rows} rows, network column = {'network' in cols}, {rescued} rescued rows.")
     METRICS["P4.rows"], METRICS["P4.rescued"] = rows, rescued
@@ -1100,7 +1155,7 @@ except Exception as e:
 # MAGIC
 # MAGIC **Q2 → B.** `COPY INTO` skips files it already loaded (E3: second run inserted {{E3.run2_inserted}} rows). A wrong: that is the behaviour with `force`. C wrong: it does not fail. D wrong: skipping is the default; `force` turns it **off**.
 # MAGIC
-# MAGIC **Q3 → B.** The source schema was already updated; the Delta table also needs permission to add the column (E5: run B `{{E5.runB_errors}}`, run C with `mergeSchema` added {{E5.runC_added}} rows). A wrong: `none` ignores new columns, it does not fix the table. C wrong: deleting the checkpoint reloads every file (duplicates). D wrong: types are not the problem.
+# MAGIC **Q3 → B.** The source schema was already updated; the Delta table also needs permission to add the column (E5: run B `{{E5.runB.errors}}`, run C with `mergeSchema` added {{E5.runC_added}} rows). A wrong: `none` ignores new columns, it does not fix the table. C wrong: deleting the checkpoint reloads every file (duplicates). D wrong: types are not the problem.
 # MAGIC
 # MAGIC **Q4 → B.** The schema location holds the `_schemas` folder (E5: files `{{E5.schema_files}}`). A wrong: processed files are tracked in the checkpoint. C wrong: it is for every format without a given schema. D wrong: the writer still needs `checkpointLocation`.
 # MAGIC
@@ -1133,7 +1188,7 @@ print(f"Dropped {FQ} (tables, volume, files, checkpoints).")
 # MAGIC | E2 CSV | plain reader: {{E2.plain_rows}} rows, `{{E2.plain_columns}}`; `read_files` + header: {{E2.rf_rows}} rows, `npi` {{E2.rf_type_npi}} → with `schemaHints` {{E2.hint_type_npi}} |
 # MAGIC | E3 `COPY INTO` | inserted {{E3.run1_inserted}} → {{E3.run2_inserted}} (rerun) → {{E3.run3_inserted}} (new file); table {{E3.after_run3}} rows |
 # MAGIC | E4 Auto Loader | added {{E4.run1_added}} → {{E4.run2_added}} → {{E4.run3_added}}; all columns strings (`claim_amount` {{E4.type_claim_amount}}); `cloud_files_state` {{E4.state_files}} files |
-# MAGIC | E5 new column | A {{E5.runA_status}} (`{{E5.runA_errors}}`), B {{E5.runB_status}} (`{{E5.runB_errors}}`), C {{E5.runC_status}} (+{{E5.runC_added}}); `_schemas` files {{E5.schema_files}} |
+# MAGIC | E5 new column | A failed (`{{E5.runA.errors}}`), B failed (`{{E5.runB.errors}}`), C with writer `mergeSchema` +{{E5.runC_added}}; `_schemas` files {{E5.schema_files}} |
 # MAGIC | E6 rescued data | {{E6.bad_amount_null}} NULL amounts with `_rescued_data`; rescue mode: `plan_type` column = {{E6.rescue_has_plan_type}}, {{E6.rescue_rows_with_rescued}} rescued rows |
 # MAGIC | Practice | P1 {{P1.rows}} rows · P2 {{P2.rows}} rows · P3 {{P3.rows}} rows, {{P3.null_amounts}} NULL amounts · P4 {{P4.rows}} rows, {{P4.rescued}} rescued |
 # MAGIC
@@ -1145,6 +1200,6 @@ print(f"Dropped {FQ} (tables, volume, files, checkpoints).")
 # MAGIC
 # MAGIC ### Surprises compared with the first expectation
 # MAGIC 1. `read_files` infers numbers, but kept `service_date` as `{{E1.type_service_date}}`, not `DATE` (E1).
-# MAGIC 2. The docs say a restart continues with the new schema. That is true for the **source**: the restart with unchanged code still failed with `{{E5.runB_errors}}`, because the Delta **writer** needs `mergeSchema` (E5).
-# MAGIC 3. A failing stream fails the notebook cell even inside `try/except` (`Some streams terminated before this command could finish!`, test run 771734934782354). This is why E5 uses a companion notebook.
+# MAGIC 2. The docs say a restart continues with the new schema. That is true for the **source**: the restart with unchanged code still failed with `{{E5.runB.errors}}`, because the Delta **writer** needs `mergeSchema` (E5).
+# MAGIC 3. A failing stream fails the notebook cell even inside `try/except` (`Some streams terminated before this command could finish!`, test run 771734934782354). This is why E5 has two cells that are expected to fail.
 # MAGIC 4. `read_files` inferred the 10-digit NPI as `{{E2.rf_type_npi}}`: it fits, but an identifier should be a string (E2).

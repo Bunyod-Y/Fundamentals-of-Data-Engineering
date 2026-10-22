@@ -25,6 +25,11 @@ old name once.
 - Every example also records its key numbers: METRICS["E3.after_insert"] = cnt, and asserts them
   where the value is known from the setup data.
 - Each cell has a title line (# DBTITLE 1,<title>).
+- One lesson = one notebook: "Databricks - Learning/LNN - <title>.ipynb", like L01. No helper notebooks.
+- METRICS[...] / WARMUP_PASSED[...] / PRACTICE_PASSED[...] lines are removed from the learner notebook:
+  keep each on one line and only record values (store stream/write results in a variable first).
+- A cell that must fail (e.g. a stream that stops on a new column): first code line
+  `# EXPECT_FAILURE: <key>`. The learner sees the real error; test runs record METRICS["<key>.errors"].
 
 ## Environment
 - Serverless. Catalog main, schema main.dbacademy_lNN, volume /Volumes/main/dbacademy_lNN/data.
