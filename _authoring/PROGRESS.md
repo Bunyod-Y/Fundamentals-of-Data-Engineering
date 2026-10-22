@@ -10,7 +10,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | L03 | Spark SQL Transformations | DONE 2026-10-22 |
 | L04 | PySpark DataFrame API, transforms, UDFs | DONE 2026-10-22 |
 | L05 | Semi-structured data: JSON, nested types, VARIANT | DONE 2026-10-22 |
-| L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-21 (built as "L03", renumbered 2026-10-22; see note) |
+| L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-22 (rebuilt to the plan) |
 | L07 | Lakeflow Declarative Pipelines I | PLANNED |
 | L08 | LDP II: AUTO CDC, SCD 1/2 | PLANNED |
 | L09 | Lakeflow Jobs | PLANNED |
@@ -30,10 +30,6 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 
 ## Open items
 
-- L06 was built and verified as "L03" (before CURRICULUM.md existed). Only file names, titles and
-  notebook metadata were renumbered. Still to do when L05 exists: change the schema inside the
-  notebook from `main.dbacademy_l03` to `main.dbacademy_l06`, rewrite the warm-up to recall L05
-  (it recalls L02 now), then rerun with `--twice` and republish.
 - L11 is the old hand-written streaming notebook; the spec lists the required fixes for the rebuild.
 
 ## Lessons learned
@@ -56,3 +52,13 @@ and what the next lesson should know.)
 - L05: "bad record" depends on the parser: the JSON reader/colon/`from_json` accept single-quoted JSON, `parse_json` does not;
   `from_json` puts a type mismatch into `_corrupt_record` too. One `schema_of_json` sample gave BIGINT and lost decimals.
 - L03 and L06 both use the schema `main.dbacademy_l03` until L06 is renumbered: running one lesson drops the other's tables.
+  (Fixed 2026-10-22: L06 now uses `main.dbacademy_l06`.)
+- L06 rebuild: Auto Loader errors that happen when the stream **starts** (no `cloudFiles.schemaLocation` →
+  CLOUDFILES_SCHEMA_LOCATION_REQUIRED; `csv` on JSON files → DELTA_INVALID_CHARACTERS_IN_COLUMN_NAMES) are raised by
+  `toTable()` and can be caught with try/except; only failures while the stream runs need `# EXPECT_FAILURE`. The
+  Databricks Connect harness (stand-ins for `run_expecting_failure` and `dbutils.fs.rm` on a missing path) matched the
+  job run value for value, so one pre-test plus the `--twice` runs were enough.
+- L06 rebuild: `CREATE OR REFRESH STREAMING TABLE` cannot run from serverless notebook compute here
+  (ST_NOT_ENABLED_ON_SERVERLESS_GENERIC_COMPUTE), but `STREAM read_files(…, schemaLocation => …)` works as a streaming
+  DataFrame. L07 must build streaming tables in a Lakeflow pipeline. To land a single named Parquet file, write with
+  `coalesce(1)` to a temp folder and `dbutils.fs.cp` the part file.
