@@ -48,6 +48,7 @@ Fundamentals-of-Data-Engineering/
 | L04 - PySpark DataFrame API, Transforms and UDFs | the L03 queries in PySpark, lazy evaluation on serverless (Spark Connect), `explain()` and broadcast joins, DDL vs `StructType`, `DataFrame.transform`, caching on serverless, Python vs Pandas UDFs (5M-row timing), wrong `returnType` → silent NULLs, Unity Catalog SQL and Python functions |
 | L05 - Semi-structured Data - JSON, Nested Types and VARIANT | FHIR-like JSON: `STRUCT`/`ARRAY` dot notation, `explode` vs `explode_outer` (lost rows), colon paths on JSON strings and their case rules, `from_json` / `schema_of_json` / `to_json`, `VARIANT` (`parse_json` vs `try_parse_json`, `variant_get` vs `try_variant_get`, `schema_of_variant(_agg)`, `variant_explode`, limits), malformed records across nine methods, flattening bronze to silver patients and observations |
 | L06 - Ingestion with Auto Loader, read_files and COPY INTO | JSON claims, CSV providers and Parquet labs: `read_files` (inference, `schemaHints`), `COPY INTO` idempotency proved with `DESCRIBE HISTORY`, Auto Loader (`schemaLocation`, `inferColumnTypes`, `availableNow`, `cloud_files_state`), schema evolution (real stop/restart) and rescued data, two start errors (no `schemaLocation`, wrong format), `_metadata` lineage columns, `binaryFile` listing, `STREAM read_files` in a notebook vs streaming tables |
+| L07 - Lakeflow Declarative Pipelines I - Medallion, Streaming Tables, Materialized Views and Expectations | a serverless pipeline created and run from the notebook (REST API through the Databricks SDK): bronze → silver → gold with `STREAM read_files`, streaming table vs materialized view vs temporary view, expectations (warn, `DROP ROW`, `FAIL UPDATE`) and a quarantine table, `event_log()` metrics, new files vs dimension changes, full refresh, dry run that finds a missing `STREAM`, the silver layer in Python (`from pyspark import pipelines as dp`) |
 | L11 - Structured Streaming Fundamentals | readStream/writeStream, triggers, output modes, watermarks, foreachBatch, checkpoints, deduplication |
 
 New lessons (L03 and later) are tested before they are published: the solved version runs twice on
@@ -118,7 +119,7 @@ serverless, and every number in the text comes from that run.
 ## 📈 Learning Path
 
 22 lessons are planned (`_authoring/CURRICULUM.md`, progress in `_authoring/PROGRESS.md`).
-Numbers follow the plan, so the notebooks that exist today are L01, L02, L03, L04, L05, L06 and L11.
+Numbers follow the plan, so the notebooks that exist today are L01, L02, L03, L04, L05, L06, L07 and L11.
 
 ```
 L01 Lakehouse Basics → L02 Delta Lake Deep Dive → L03 Spark SQL → L04 PySpark → L05 JSON/VARIANT
