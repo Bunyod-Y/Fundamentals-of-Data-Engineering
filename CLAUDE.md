@@ -85,6 +85,21 @@ old name once.
   usual `cache()` fix is unavailable (select another column or save a table); VARIANT cannot be a CLUSTER BY
   key (DELTA_CLUSTERING_COLUMNS_DATATYPE_NOT_SUPPORTED); the 3.5.0 job client still has `F.parse_json` and
   collects VARIANT values as VariantVal.
+- Verified (L06 rebuild, 2026-10-22): `CREATE OR REFRESH STREAMING TABLE` from serverless notebook compute fails with
+  STREAMING_TABLE_OPERATION_NOT_ALLOWED.ST_NOT_ENABLED_ON_SERVERLESS_GENERIC_COMPUTE (build streaming tables in a
+  Lakeflow pipeline); `spark.sql("SELECT … FROM STREAM read_files(…)")` is a streaming DataFrame but needs
+  `schemaLocation => '…'` (else CLOUDFILES_SCHEMA_LOCATION_REQUIRED, the same error as Auto Loader without
+  `cloudFiles.schemaLocation`); Auto Loader errors at stream start (that one, DELTA_INVALID_CHARACTERS_IN_COLUMN_NAMES
+  for a wrong format) are raised by `toTable()` and can be caught with try/except; `_metadata.file_path` and the
+  binaryFile `path` start with `dbfs:/Volumes/…`; a `COPY INTO` rerun that loads no files writes no table version.
+- Verified (L07, 2026-10-22): Lakeflow pipelines run fine when created from a serverless job notebook via the Pipelines REST
+  API (`w.api_client.do`; the preinstalled databricks-sdk is 0.40.0 and its typed `pipelines.create` lacks `root_path`);
+  source files are plain workspace files (`w.workspace.upload(..., format=ImportFormat.AUTO)`); `event_log('<id>')` works
+  from the notebook as the run-as user; Free Edition: at most two lesson pipelines at once (a third fails with
+  RESOURCE_EXHAUSTED, then `event_log()` gives EVENT_LOG_UNAVAILABLE — use the events API); FAIL UPDATE ->
+  EXPECTATION_VIOLATION.VERBOSITY_ALL, update FAILED, the flow writes 0 rows, a parallel MV completes; a streaming table
+  without STREAM -> CREATE_APPEND_ONCE_FLOW_FROM_BATCH_QUERY_NOT_ALLOWED (a dry run finds it); deleting a pipeline keeps
+  its tables; full refresh shows `DLT REFRESH` in DESCRIBE HISTORY.
 - Workspace limits: the public DBFS root is disabled (use /Volumes only); no storage credential or
   external location of our own (external tables, s3://, abfss://, gs:// sources, file-notification
   mode are NOT VERIFIED — concept only).
@@ -132,8 +147,8 @@ NOT VERIFIED list, surprises).
 - L03 Spark SQL Transformations: joins, aggregations, window functions
 - L04 PySpark DataFrame API, reusable transforms, UDFs
 - L05 Semi-structured data: JSON, nested types, VARIANT
-- L06 Ingestion: read_files, COPY INTO, Auto Loader — done (built as "L03"; schema/warm-up renumber pending, see PROGRESS.md)
-- L07 Lakeflow Declarative Pipelines I: medallion, streaming tables, MVs, expectations
+- L06 Ingestion: read_files, COPY INTO, Auto Loader, Parquet, `_metadata`, binaryFile — done (rebuilt to the plan 2026-10-22)
+- L07 Lakeflow Declarative Pipelines I: medallion, streaming tables, MVs, expectations — done
 - L08 LDP II: AUTO CDC, SCD Type 1 / Type 2
 - L09 Lakeflow Jobs: tasks, parameters, control flow, repair
 - L10 Unity Catalog governance
