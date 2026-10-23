@@ -42,7 +42,6 @@ Fundamentals-of-Data-Engineering/
 | Notebook | Topics |
 |---|---|
 | L01 - Lakehouse Basics | Unity Catalog namespace, notebooks, compute, Delta tables, DML, MERGE, history, time travel, RESTORE, UNDROP |
-| L01 - Practical Purposes | quick navigation queries (SHOW / USE) |
 | L02 - Delta Lake Deep Dive | schema evolution, constraints, generated/identity columns, managed vs external, CLONE, maintenance |
 | L03 - Spark SQL Transformations | joins incl. SEMI/ANTI/CROSS, NULL keys and `<=>`, the `NOT IN` + NULL trap, `QUALIFY` dedup, `LAG`/`LEAD`, window frames and ties, ranking functions, `ROLLUP`/`CUBE`/`GROUPING SETS`, `PIVOT`/`UNPIVOT`, higher-order functions, set operators, `FILTER` vs `CASE` |
 | L04 - PySpark DataFrame API, Transforms and UDFs | the L03 queries in PySpark, lazy evaluation on serverless (Spark Connect), `explain()` and broadcast joins, DDL vs `StructType`, `DataFrame.transform`, caching on serverless, Python vs Pandas UDFs (5M-row timing), wrong `returnType` → silent NULLs, Unity Catalog SQL and Python functions |

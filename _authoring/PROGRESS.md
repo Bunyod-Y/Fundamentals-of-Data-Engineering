@@ -12,7 +12,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | L05 | Semi-structured data: JSON, nested types, VARIANT | DONE 2026-10-22 |
 | L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-22 (rebuilt to the plan) |
 | L07 | Lakeflow Declarative Pipelines I | DONE 2026-10-22 |
-| L08 | LDP II: AUTO CDC, SCD 1/2 | PLANNED |
+| L08 | LDP II: AUTO CDC, SCD 1/2 | IN PROGRESS (source written 2026-10-23; verification stopped by the Free Edition compute quota — see _authoring/L08.md) |
 | L09 | Lakeflow Jobs | PLANNED |
 | L10 | Unity Catalog governance | PLANNED |
 | L11 | Structured Streaming fundamentals | LEGACY (old notebook kept as "L11 - Structured Streaming Fundamentals.ipynb"; rebuild per spec) |
