@@ -105,6 +105,13 @@ old name once.
   (fair usage policy). In 12 days GENIE (Genie Code in the browser UI) used ~389 DBU, all lesson builds ~23 DBU.
   Serverless auto-optimization retried a failed one-time lesson run (doubling its compute): run_lesson.py now
   submits the task with `disable_auto_optimization: true`. Build lessons when nothing else uses compute.
+- Verified (L08, 2026-10-24): AUTO CDC SQL `TRACK HISTORY ON specialty` works without parentheses (with
+  `(specialty)` the pre-test failed with PARSE_SYNTAX_ERROR); a pipeline publishes its event log as a MANAGED table
+  `event_log_<pipeline id with _>` in the target schema without the `event_log` setting; `event_log()` read right after an
+  update is COMPLETED can still show flows `RUNNING` with 0 metrics (poll until every flow has a final status); AUTO CDC flows
+  report `num_upserted_rows`/`num_deleted_rows` (a Python flow and a FROM SNAPSHOT flow are named after their target; FROM
+  SNAPSHOT reports 0), plus `flow_progress` events named `missingFlowName` without a status; `__START_AT` has the SEQUENCE BY
+  type (timestamp) or bigint for snapshot versions.
 - Workspace limits: the public DBFS root is disabled (use /Volumes only); no storage credential or
   external location of our own (external tables, s3://, abfss://, gs:// sources, file-notification
   mode are NOT VERIFIED — concept only).
@@ -154,7 +161,7 @@ NOT VERIFIED list, surprises).
 - L05 Semi-structured data: JSON, nested types, VARIANT
 - L06 Ingestion: read_files, COPY INTO, Auto Loader, Parquet, `_metadata`, binaryFile — done (rebuilt to the plan 2026-10-22)
 - L07 Lakeflow Declarative Pipelines I: medallion, streaming tables, MVs, expectations — done
-- L08 LDP II: AUTO CDC, SCD Type 1 / Type 2
+- L08 LDP II: AUTO CDC, SCD Type 1 / Type 2 — done
 - L09 Lakeflow Jobs: tasks, parameters, control flow, repair
 - L10 Unity Catalog governance
 - L11 Structured Streaming fundamentals — legacy notebook kept; rebuild per spec
