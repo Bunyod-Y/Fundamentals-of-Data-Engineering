@@ -100,6 +100,11 @@ old name once.
   EXPECTATION_VIOLATION.VERBOSITY_ALL, update FAILED, the flow writes 0 rows, a parallel MV completes; a streaming table
   without STREAM -> CREATE_APPEND_ONCE_FLOW_FROM_BATCH_QUERY_NOT_ALLOWED (a dry run finds it); deleting a pipeline keeps
   its tables; full refresh shows `DLT REFRESH` in DESCRIBE HISTORY.
+- Free Edition compute (checked 2026-10-23 in system.billing.usage + system.access.audit): the limit is serverless
+  compute, not storage ("You've hit the limit for serverless compute for free usage"); no number is published
+  (fair usage policy). In 12 days GENIE (Genie Code in the browser UI) used ~389 DBU, all lesson builds ~23 DBU.
+  Serverless auto-optimization retried a failed one-time lesson run (doubling its compute): run_lesson.py now
+  submits the task with `disable_auto_optimization: true`. Build lessons when nothing else uses compute.
 - Workspace limits: the public DBFS root is disabled (use /Volumes only); no storage credential or
   external location of our own (external tables, s3://, abfss://, gs:// sources, file-notification
   mode are NOT VERIFIED — concept only).

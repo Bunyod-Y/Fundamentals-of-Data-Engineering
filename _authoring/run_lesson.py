@@ -60,8 +60,11 @@ def run_once(cli, lesson, notebook_path, code_hash):
     submit = {
         "run_name": f"{lesson} solved build",
         "timeout_seconds": RUN_TIMEOUT_SECONDS,
-        # No cluster spec: the task runs on serverless compute
-        "tasks": [{"task_key": "lesson", "notebook_task": {"notebook_path": notebook_path, "source": "WORKSPACE"}}],
+        # No cluster spec: the task runs on serverless compute. Serverless auto-optimization "retries failed
+        # tasks" (docs: Run your Lakeflow Jobs with serverless compute); a retry re-runs the whole lesson and
+        # doubles the Free Edition compute of a failed run, so it is switched off (SDK field SubmitTask.disable_auto_optimization)
+        "tasks": [{"task_key": "lesson", "disable_auto_optimization": True,
+                   "notebook_task": {"notebook_path": notebook_path, "source": "WORKSPACE"}}],
     }
     run_id = cli("jobs", "submit", "--no-wait", "--json", json.dumps(submit))["run_id"]
     print(f"submitted run {run_id}")
@@ -77,13 +80,14 @@ def run_once(cli, lesson, notebook_path, code_hash):
             break
         time.sleep(POLL_SECONDS)
 
-    task = run["tasks"][0]
+    task = max(run["tasks"], key=lambda t: t.get("attempt_number", 0))   # the last attempt if a task was retried
     output = cli("jobs", "get-run-output", str(task["run_id"]))
     record = {
         "lesson": lesson,
         "started_utc": started.isoformat(timespec="seconds"),
         "run_id": run_id,
         "task_run_id": task["run_id"],
+        "task_attempts": len(run["tasks"]),
         "life_cycle_state": state,
         "result_state": run["state"].get("result_state"),
         "state_message": run["state"].get("state_message"),
