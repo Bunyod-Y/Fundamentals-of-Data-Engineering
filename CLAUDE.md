@@ -112,6 +112,17 @@ old name once.
   report `num_upserted_rows`/`num_deleted_rows` (a Python flow and a FROM SNAPSHOT flow are named after their target; FROM
   SNAPSHOT reports 0), plus `flow_progress` events named `missingFlowName` without a status; `__START_AT` has the SEQUENCE BY
   type (timestamp) or bigint for snapshot versions.
+- Verified (L09, 2026-10-26): jobs created from a serverless job notebook through the Jobs REST API 2.2 (`w.api_client.do`)
+  run on serverless without cluster settings (`effective_performance_target` PERFORMANCE_OPTIMIZED); a Python script task
+  needs `environment_key` + `environments[].spec.environment_version` ("4" works) and gets job parameters only through
+  `{{job.parameters.x}}` in its list; `disable_auto_optimization` is stored on tasks with code but silently dropped on
+  If/else and For each parent tasks; `jobs/create` rejects wrong `depends_on` keys, cycles, `outcome` on a non-condition
+  dependency and invalid `job.*`/`tasks.*` references (also `tasks.x.value.y`) with INVALID_PARAMETER_VALUE;
+  `{{tasks.x.result_state}}` resolves to lower case (`failed`) and `{{tasks.x.error_code}}` to `RunExecutionError`; a
+  repair keeps the run id, the run's `tasks` list then holds both attempts of each repaired task, and
+  `{{task.execution_count}}` counts an UPSTREAM_FAILED attempt; `runs/get?include_resolved_values=true` returned no
+  `resolved_values`; per-task `run_duration` can be absent (use end_time - start_time); paused file-arrival (UC volume
+  folder) and table-update triggers can be created. Markdown must not contain `{{` — write job references as HTML entities.
 - Workspace limits: the public DBFS root is disabled (use /Volumes only); no storage credential or
   external location of our own (external tables, s3://, abfss://, gs:// sources, file-notification
   mode are NOT VERIFIED — concept only).
@@ -162,7 +173,7 @@ NOT VERIFIED list, surprises).
 - L06 Ingestion: read_files, COPY INTO, Auto Loader, Parquet, `_metadata`, binaryFile — done (rebuilt to the plan 2026-10-22)
 - L07 Lakeflow Declarative Pipelines I: medallion, streaming tables, MVs, expectations — done
 - L08 LDP II: AUTO CDC, SCD Type 1 / Type 2 — done
-- L09 Lakeflow Jobs: tasks, parameters, control flow, repair
+- L09 Lakeflow Jobs: tasks, parameters, control flow, repair — done
 - L10 Unity Catalog governance
 - L11 Structured Streaming fundamentals — legacy notebook kept; rebuild per spec
 - L12 Streaming advanced: joins, Delta source options, state, checkpoint compatibility

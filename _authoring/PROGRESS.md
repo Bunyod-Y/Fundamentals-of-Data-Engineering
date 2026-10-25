@@ -13,7 +13,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-22 (rebuilt to the plan) |
 | L07 | Lakeflow Declarative Pipelines I | DONE 2026-10-22 |
 | L08 | LDP II: AUTO CDC, SCD 1/2 | DONE 2026-10-24 |
-| L09 | Lakeflow Jobs | PLANNED |
+| L09 | Lakeflow Jobs | DONE 2026-10-26 |
 | L10 | Unity Catalog governance | PLANNED |
 | L11 | Structured Streaming fundamentals | LEGACY (old notebook kept as "L11 - Structured Streaming Fundamentals.ipynb"; rebuild per spec) |
 | L12 | Streaming advanced | PLANNED |
@@ -78,3 +78,12 @@ and what the next lesson should know.)
   (flows still `RUNNING`, metrics 0); wait until every flow has a final status before reading metrics (L16 monitoring too).
 - L08: AUTO CDC facts for later lessons: `TRACK HISTORY ON col` takes no parentheses; the snapshot flow is named after its target
   and reports no upsert/delete metrics; a late SCD Type 2 change is inserted inside the history; L14 can reuse the feeds.
+- L09: a free desk-check (create each job definition through the API, read it back, delete it; no run) caught nothing but
+  confirmed every JSON before compute was spent; the lesson then needed only three job runs (352 s, then `--twice` 600 s +
+  585 s, ~26 min in total, task_attempts 1). Each lesson run starts 4 job runs + 2 repairs = 14 task runs with code, at most 3
+  job tasks at a time; jobs and their definitions (create/get/update/delete) cost no compute.
+- L09: the Jobs API rejects at create time (`INVALID_PARAMETER_VALUE`) a wrong `depends_on` key, a cycle, `outcome` on a
+  non-condition dependency and invalid references in the known namespaces (`job`, `tasks`) — also a typo `value` for
+  `values`; `include_resolved_values=true` returned no resolved values, so check references through what the task received.
+- L09: markdown cannot contain `{{` (placeholders, and verify.py counts it): write job references in markdown as
+  `<code>&#123;&#123;…&#125;&#125;</code>`; the build now renders SOLUTION blocks that contain `{{` as an HTML `<pre>` block.

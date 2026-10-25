@@ -21,6 +21,7 @@ values: one line, and no work (streams, writes, file landing) on the right side.
 """
 import argparse
 import hashlib
+import html
 import json
 import re
 import sys
@@ -174,6 +175,14 @@ def expand_solutions(cell, solutions):
         bid = m.group(1)
         if bid not in solutions:
             raise BuildError(f"{{{{solution:{bid}}}}} has no matching '# >>> SOLUTION {bid}' block")
+        if any("{{" in l for l in solutions[bid]):
+            # Code with {{...}} (for example job dynamic value references) would be read as placeholders in a
+            # markdown cell, so it is shown as an HTML <pre> block with the braces written as entities
+            esc = lambda s: html.escape(s, quote=False).replace("{", "&#123;").replace("}", "&#125;")
+            out.append("# MAGIC <pre><code>" + esc(solutions[bid][0] if solutions[bid] else ""))
+            out += [f"# MAGIC {esc(l)}".rstrip() for l in solutions[bid][1:]]
+            out.append("# MAGIC </code></pre>")
+            continue
         out.append("# MAGIC ```python")
         out += [f"# MAGIC {l}".rstrip() for l in solutions[bid]]
         out.append("# MAGIC ```")
