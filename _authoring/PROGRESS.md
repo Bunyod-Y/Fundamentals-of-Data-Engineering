@@ -12,7 +12,7 @@ before the toolchain (no placeholders, no run record) · PLANNED = spec only.
 | L05 | Semi-structured data: JSON, nested types, VARIANT | DONE 2026-10-22 |
 | L06 | Ingestion: read_files, COPY INTO, Auto Loader | DONE 2026-10-22 (rebuilt to the plan) |
 | L07 | Lakeflow Declarative Pipelines I | DONE 2026-10-22 |
-| L08 | LDP II: AUTO CDC, SCD 1/2 | IN PROGRESS (source written 2026-10-23; verification stopped by the Free Edition compute quota — see _authoring/L08.md) |
+| L08 | LDP II: AUTO CDC, SCD 1/2 | DONE 2026-10-24 |
 | L09 | Lakeflow Jobs | PLANNED |
 | L10 | Unity Catalog governance | PLANNED |
 | L11 | Structured Streaming fundamentals | LEGACY (old notebook kept as "L11 - Structured Streaming Fundamentals.ipynb"; rebuild per spec) |
@@ -70,3 +70,11 @@ and what the next lesson should know.)
   the events API: `event_log()` is unavailable for a pipeline whose updates never got compute.
 - L07: streaming flows report row counts in `flow_progress` events with status RUNNING (sum all events of a flow); the
   data quality JSON also has an undocumented `warned_records` field; deleting a pipeline keeps its tables (current docs).
+- L08: the first 2026-10-23 run hit the Free Edition serverless quota after a full local pre-test the same day; on 2026-10-24
+  (no pre-test, `disable_auto_optimization`, one pipeline at a time) the lesson needed three job runs (~21 min) and no update
+  hit RESOURCE_EXHAUSTED. Budget compute per day: skip local pipeline pre-tests, and read a failed run's cell outputs for free
+  with `databricks jobs export-run <task_run_id> --views-to-export CODE` (the notebook model is base64 + URL-encoded JSON).
+- L08: `event_log()` read immediately after an update reached COMPLETED can still lack the final `flow_progress` events
+  (flows still `RUNNING`, metrics 0); wait until every flow has a final status before reading metrics (L16 monitoring too).
+- L08: AUTO CDC facts for later lessons: `TRACK HISTORY ON col` takes no parentheses; the snapshot flow is named after its target
+  and reports no upsert/delete metrics; a late SCD Type 2 change is inserted inside the history; L14 can reuse the feeds.

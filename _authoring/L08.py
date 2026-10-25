@@ -546,7 +546,7 @@ display(spark.table(f"{FQ}.patients_cdc").orderBy("arrival_ts"))
 # MAGIC
 # MAGIC The SDK preinstalled on serverless job compute is `{{nd.setup.sdk_version}}` in this run; L07 showed that its typed `w.pipelines.create(...)` does not know newer fields such as `root_path`, so the lesson calls the REST API directly.
 # MAGIC
-# MAGIC **New helper for AUTO CDC:** `cdc_metrics(pipeline_id, update_id)` reads `num_upserted_rows` and `num_deleted_rows` per flow from the `flow_progress` events. "The `num_output_rows` metric, output for non-CDC flows, is not captured for AUTO CDC queries" (*Advanced AUTO CDC topics*).
+# MAGIC **New helper for AUTO CDC:** `cdc_metrics(pipeline_id, update_id)` reads `num_upserted_rows` and `num_deleted_rows` per flow from the `flow_progress` events. "The `num_output_rows` metric, output for non-CDC flows, is not captured for AUTO CDC queries" (*Advanced AUTO CDC topics*). The last `flow_progress` events of an update can reach the event log some seconds **after** the update has ended, so `cdc_metrics` reads the log again every 10 s until every flow has a final status (in this run it waited {{nd.E1.event_wait_s}} s after update 1 and {{nd.E2.event_wait_s}} s after update 2).
 
 # COMMAND ----------
 
@@ -587,7 +587,7 @@ def update_errors(pipeline_id, update_id):
         if not token:
             return found
 
-def run_update(pipeline_id, full_refresh=False, validate_only=False, timeout_s=1800, tries=3):
+def run_update(pipeline_id, full_refresh=False, validate_only=False, timeout_s=1800, tries=4):
     """Start one update, wait until it ends, and return (update_id, final state, seconds)."""
     started = time.time()
     for attempt in range(1, tries + 1):
@@ -603,8 +603,9 @@ def run_update(pipeline_id, full_refresh=False, validate_only=False, timeout_s=1
             time.sleep(10)                                    # check again in 10 seconds
         no_capacity = state == "FAILED" and any("RESOURCE_EXHAUSTED" in x[2] for x in update_errors(pipeline_id, update_id))
         if no_capacity and attempt < tries:                   # free-usage limit: no serverless capacity yet
-            print(f"update {update_id}: no serverless capacity (RESOURCE_EXHAUSTED), trying again in 60 s")
-            time.sleep(60)
+            wait_s = 90 * attempt                             # wait longer each time: 90, 180, 270 s
+            print(f"update {update_id}: no serverless capacity (RESOURCE_EXHAUSTED), trying again in {wait_s} s")
+            time.sleep(wait_s)
             continue
         seconds = round(time.time() - started)
         print(f"update {update_id}: {state} after {seconds} s")
@@ -613,8 +614,28 @@ def run_update(pipeline_id, full_refresh=False, validate_only=False, timeout_s=1
                 print(f"ERROR in {event_type}: {message}\n    {exceptions[:700]}\n")
         return update_id, state, seconds
 
-def cdc_metrics(pipeline_id, update_id):
-    """One row per flow of one update: final status, rows upserted and deleted by AUTO CDC, other output rows."""
+FINAL_FLOW_STATES = {"COMPLETED", "FAILED", "STOPPED", "SKIPPED", "EXCLUDED", "IDLE"}   # a flow_progress status that ends a flow
+event_wait_s = 0                                              # seconds the last cdc_metrics call waited for the event log
+
+def cdc_metrics(pipeline_id, update_id, timeout_s=300):
+    """One row per flow of one update: final status, rows upserted and deleted by AUTO CDC, other output rows.
+    The last flow_progress events can reach the event log after the update has ended, so this waits until every flow
+    has a final status (at most timeout_s seconds)."""
+    global event_wait_s
+    started = time.time()
+    while True:
+        df = flow_metrics_query(pipeline_id, update_id)
+        waiting = [r["flow"] for r in df.collect() if r["final_status"] not in FINAL_FLOW_STATES]
+        event_wait_s = round(time.time() - started)
+        if not waiting:
+            return df
+        if time.time() - started > timeout_s:
+            print(f"event log: still no final status after {event_wait_s} s for {waiting}")
+            return df
+        time.sleep(10)                                        # the events are still arriving: check again in 10 s
+
+def flow_metrics_query(pipeline_id, update_id):
+    """The event log query of cdc_metrics (one row per flow, read once)."""
     return spark.sql(f"""
         SELECT substring_index(origin.flow_name, '.', -1)                                 AS flow,
                max_by(details:flow_progress.status::string, timestamp)
@@ -806,6 +827,7 @@ u1, u1_state, u1_secs = run_update(MAIN)                      # update 1: applie
 assert u1_state == "COMPLETED", update_errors(MAIN, u1)
 
 e1_metrics = cdc_metrics(MAIN, u1)                            # upserted / deleted rows per flow (event log)
+e1_event_wait_s = event_wait_s                                # how long the last events took to arrive
 display(e1_metrics)
 e1_scd1 = patient_rows("patients_scd1")                       # the SCD Type 1 table after delivery 1
 display(e1_scd1)
@@ -826,6 +848,7 @@ raw_flow_names = [r[0] for r in spark.sql(f"""SELECT DISTINCT substring_index(or
                   WHERE event_type = 'flow_progress' ORDER BY 1""").collect()]   # all names, also events without a status
 METRICS["E1.state"] = u1_state
 METRICS["nd.E1.secs"] = u1_secs
+METRICS["nd.E1.event_wait_s"] = e1_event_wait_s
 METRICS["E1.flow_names"] = ", ".join(sorted(e1_flows))
 METRICS["E1.cdc_metrics"] = metrics_text(e1_metrics)
 METRICS["E1.scd1_rows"] = e1_scd1.count()
@@ -835,7 +858,7 @@ METRICS["E1.scd2_columns"] = ", ".join(spark.table(f"{FQ}.patients_scd2").column
 METRICS["E1.scd2_rows"] = spark.table(f"{FQ}.patients_scd2").count()
 METRICS["E1.published"] = ", ".join(f"{r['table_name']} ({r['table_type']})" for r in published.collect() if not r["table_name"].startswith("event_log_"))
 METRICS["E1.event_log_table"] = ", ".join(f"event_log_<pipeline id> ({r['table_type']})" for r in published.collect() if r["table_name"] == "event_log_" + MAIN.replace("-", "_"))
-METRICS["E1.raw_flow_names"] = ", ".join(raw_flow_names)
+METRICS["nd.E1.raw_flow_names"] = ", ".join(raw_flow_names)
 METRICS["nd.E1.history_ops"] = ", ".join(r["operation"] for r in history.orderBy("version").collect())
 METRICS["E7.plans_u1"] = rows_text(plans_u1)
 METRICS["E8.payers_u1"] = rows_text(payers_u1)
@@ -879,6 +902,7 @@ u2, u2_state, u2_secs = run_update(MAIN)                      # update 2: a norm
 assert u2_state == "COMPLETED", update_errors(MAIN, u2)
 
 e2_metrics = cdc_metrics(MAIN, u2)                            # what each flow wrote in update 2
+e2_event_wait_s = event_wait_s
 display(e2_metrics)
 e2_scd1 = patient_rows("patients_scd1")                       # sequence_num decides the order
 display(e2_scd1)
@@ -894,6 +918,7 @@ display(e2_diff)
 plan_of = lambda df, pid: next((r["insurance_plan"] for r in df.collect() if r["patient_id"] == pid), "no row")
 METRICS["E2.state"] = u2_state
 METRICS["nd.E2.secs"] = u2_secs
+METRICS["nd.E2.event_wait_s"] = e2_event_wait_s
 METRICS["E2.cdc_metrics"] = metrics_text(e2_metrics)
 METRICS["E2.scd2_upserted"] = {r["flow"]: r["upserted_rows"] for r in e2_metrics.collect()}.get("patients_scd2_flow")
 METRICS["E2.scd1_rows"] = e2_scd1.count()
@@ -912,7 +937,7 @@ assert (plan_of(e2_scd1, 6), plan_of(e2_arrival, 6), plan_of(e2_scd1, 5), e2_scd
 # MAGIC %md
 # MAGIC **Explained (real output from this run):**
 # MAGIC
-# MAGIC * Update 2: `{{E2.state}}`. Rows written per flow: `{{E2.cdc_metrics}}`. `patients_scd1_flow` wrote only the changes that won; the late ones changed nothing. The SCD Type 2 flow upserted {{E2.scd2_upserted}} rows for 6 change rows: the metric counts target rows written, and late changes also change older versions (E4).
+# MAGIC * Update 2: `{{E2.state}}`. Rows written per flow: `{{E2.cdc_metrics}}`. `patients_scd1_flow` wrote only the changes that won; the late ones changed nothing. The SCD Type 2 flow upserted {{E2.scd2_upserted}} rows for 6 change rows: the metric is not the number of change rows; in SCD Type 2 a change also closes the previous version, and a late change also changes an older version (E4).
 # MAGIC * `patients_scd1` now has **{{E2.scd1_rows}}** rows: `{{E2.scd1_table}}`.
 # MAGIC * Patient 6: `patients_scd1` shows **{{E2.p6_scd1}}**. The late change (sequence 8, `PLAN_B`) arrived after the change at 13, but its sequence is lower, so AUTO CDC did not apply it over the newer value.
 # MAGIC * Patient 5 in `patients_scd1`: {{E2.p5_scd1}}. The late update at 9 is older than the delete at 12.
@@ -969,7 +994,7 @@ assert p5_scd1.count() == 0 and p5_scd2.count() == 2 and p5_nodel.count() == 1
 # MAGIC **Explained (real output from this run):**
 # MAGIC
 # MAGIC * `patients_scd1` has **{{E3.p5_scd1_rows}}** rows for patient 5. The late update at 9 did not bring the patient back: AUTO CDC keeps the deleted key as a **tombstone** with its sequence, so it can ignore older changes ("To handle out-of-order data, the deleted row is temporarily retained as a tombstone", default retention two days — *create_auto_cdc_flow*).
-# MAGIC * `patients_scd2` keeps the history of patient 5 ({{E3.p5_scd2_rows}} rows; patient, name, city, plan, start, end): `{{E3.p5_scd2}}`. The delete closed the last version; no version is open (`__END_AT` is set).
+# MAGIC * `patients_scd2` keeps the history of patient 5 ({{E3.p5_scd2_rows}} rows; patient, name, city, plan, start, end): `{{E3.p5_scd2}}`. The late update at 9 (17:00) was placed **inside** the history, before the delete at 12 (20:00); the delete closed the last version, so no version is open (`__END_AT` is set).
 # MAGIC * Without `APPLY AS DELETE WHEN`, the delete row is treated like any other change and **upserted**: `patients_no_deletes` has this row for patient 5: `{{E3.p5_no_deletes}}` (a dash is NULL), and {{E3.no_deletes_rows}} rows in total.
 # MAGIC * Deleted rows in the event log (both updates, per flow): {{E3.deleted_all}}. `patients_scd1_flow` reports {{E3.deleted_scd1}}: `num_deleted_rows` is "The number of existing output rows deleted from the dataset during an update" (*Advanced AUTO CDC topics*), and patient 5 was inserted and deleted in the same delivery, so no existing row had to be removed. The plan `TRUNCATE` counted {{E3.deleted_plans}} deleted rows (E7).
 # MAGIC
@@ -1194,7 +1219,7 @@ assert payers_u2.count() == 5 and payers_u2.filter("__END_AT IS NULL").count() =
 # MAGIC * After update 2: **{{E8.rows}}** rows, {{E8.current_rows}} current: `{{E8.payers_u2}}`.
 # MAGIC * Payer 2 got a new version, payer 3 (missing in version 2) was closed like a delete, payer 4 was inserted, payer 1 kept its version. `__START_AT` / `__END_AT` are the snapshot **versions** (type `{{E8.start_type}}`), because the version query decides the order.
 # MAGIC * Event log of update 2: the snapshot flow is named `{{E8.flow_name}}` (its target) and reports `{{E8.flow_metrics}}` (upserted/deleted) — as *Advanced AUTO CDC topics* says, these metrics are "captured only by AUTO CDC queries and not by AUTO CDC FROM SNAPSHOT queries". Read the table to see what changed.
-* **Pipeline deleted.** The code then deletes the example pipeline (Free Edition: at most two lesson pipelines at a time, L07; the practice needs its own). Its tables stay and can still be read: `patients_scd2` has {{E8.rows_after_pipeline_delete}} rows (L07 E6; *Use Unity Catalog with pipelines*). They can no longer be updated by that pipeline.
+# MAGIC * **Pipeline deleted.** The code then deletes the example pipeline (Free Edition: at most two lesson pipelines at a time, L07; the practice needs its own). Its tables stay and can still be read: `patients_scd2` has {{E8.rows_after_pipeline_delete}} rows (L07 E6; *Use Unity Catalog with pipelines*). They can no longer be updated by that pipeline.
 # MAGIC
 # MAGIC > **Key takeaway:** no change feed, only full extracts → AUTO CDC FROM SNAPSHOT. It finds inserts, updates and deletes by comparing snapshots in version order, but it cannot see changes that happened between two snapshots.
 
@@ -1842,7 +1867,7 @@ print(f"Deleted the lesson pipelines ({len(left)} left), the folder {RUNTIME} an
 # MAGIC
 # MAGIC ### Surprises compared with the first expectation
 # MAGIC 1. The pipeline published its event log as a table in the target schema (`{{E1.event_log_table}}`) without the `event_log` setting.
-# MAGIC 2. The event log has `flow_progress` events with the flow name `missingFlowName` and no status (all names: `{{E1.raw_flow_names}}`); `cdc_metrics` skips them. The AUTO CDC FROM SNAPSHOT flow is listed under its **target** name (`{{E8.flow_name}}`), not under its `CREATE FLOW` name, and reports `{{E8.flow_metrics}}`.
+# MAGIC 2. The event log has `flow_progress` events with the flow name `missingFlowName` and no status (all names: `{{nd.E1.raw_flow_names}}`); `cdc_metrics` skips them. The AUTO CDC FROM SNAPSHOT flow is listed under its **target** name (`{{E8.flow_name}}`), not under its `CREATE FLOW` name, and reports `{{E8.flow_metrics}}`.
 # MAGIC 3. `num_deleted_rows` stayed {{E3.deleted_scd1}} for the patient delete (insert and delete in the same delivery: no existing row), while one `TRUNCATE` counted {{E3.deleted_plans}} deleted rows. `num_upserted_rows` of SCD Type 2 counts written versions: {{E2.scd2_upserted}} in update 2 for 6 change rows.
 # MAGIC 4. Exact duplicate change rows (same key, same sequence) did not fail the flow and created no extra version (E6); the docs only define the case of "one distinct update per key at each sequencing value".
 # MAGIC 5. The hand-written SCD Type 2 `MERGE` looked correct but brought back a deleted patient through a late update (E9: `{{E9.only_manual}}`).
